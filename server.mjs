@@ -87,11 +87,14 @@ function speechText(text) {
     .trim();
 }
 
-async function routerVoice(text) {
+// Voices the visitor may pick on screen; anything else falls back to the configured default.
+const VOICES = ['es-PY-TaniaNeural', 'es-PY-MarioNeural', 'es-AR-ElenaNeural', 'es-US-PalomaNeural', 'es-ES-XimenaMultilingualNeural', 'en-US-AvaMultilingualNeural'];
+
+async function routerVoice(text, voice) {
   const response = await fetch(`${ROUTER_API_BASE}/audio/speech`, {
     method: 'POST', signal: AbortSignal.timeout(45000),
     headers: { Authorization: `Bearer ${ROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: ROUTER_TTS_MODEL, input: speechText(text) }),
+    body: JSON.stringify({ model: VOICES.includes(voice) ? `edge-tts/${voice}` : ROUTER_TTS_MODEL, input: speechText(text) }),
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
@@ -159,7 +162,7 @@ Estás en una llamada telefónica: todo lo que escribas se lee en voz alta tal c
 
 - Hablá como una persona paraguaya amable y relajada, de vos. Usá oraciones completas y naturales, con sus artículos y conectores, como cuando conversás. Nunca escribas en estilo telegrama ni en forma de instrucciones sueltas.
 - Sé breve: una o dos oraciones, unas treinta palabras como máximo. Empezá con una reacción corta y humana cuando venga al caso ("Dale", "Uy, qué macana", "Claro").
-- En el primer turno saludá con calidez y decí en pocas palabras que sos el asistente de consulta sobre Personal. Después no te presentes ni saludes de nuevo.
+- Al empezar la llamada ya saludaste y te presentaste como asistente de Personal. No vuelvas a saludar ni a presentarte, y nunca digas "asistente de consulta sobre Personal Paraguay": andá directo a lo que te piden.
 - Nada de listas, símbolos, paréntesis, barras ni abreviaturas. Escribí "guaraníes", "megas" y "gigas".
 - Decí los precios como se hablan: "ciento cincuenta mil guaraníes".
 - No enumeres todo: contá una o dos opciones y ofrecé seguir.
@@ -256,8 +259,8 @@ async function complete(messages) {
   return { content, usage: data.usage || null };
 }
 
-async function speak(text) {
-  if (ROUTER_API_KEY && ROUTER_TTS_MODEL) return routerVoice(text);
+async function speak(text, voice) {
+  if (ROUTER_API_KEY && ROUTER_TTS_MODEL) return routerVoice(text, voice);
   return { audio: process.env.OPENAI_API_KEY ? await naturalVoice(text) : await synthesizeVoice(text), contentType: 'audio/wav' };
 }
 
@@ -305,7 +308,7 @@ async function handleTurn(req, res) {
     if (!question) return res.end();
     const { content } = await complete([...cleanMessages(input.messages), { role: "user", content: question }].slice(-12));
     send({ type: "reply", text: content });
-    const clips = speechParts(content).map((part) => speak(part));
+    const clips = speechParts(content).map((part) => speak(part, input.voice));
     clips.forEach((clip) => clip.catch(() => {}));
     for (const clip of clips) {
       const voice = await clip;
@@ -372,7 +375,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/speak") {
       const input = await readJson(req);
       if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 8000) return json(res, 400, { error: 'Texto de voz inválido.' });
-      const speech = await speak(input.text);
+      const speech = await speak(input.text, input.voice);
       const { audio, contentType } = speech;
       res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': audio.length, 'Cache-Control': 'no-store' });
       return res.end(audio);

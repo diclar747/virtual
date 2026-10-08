@@ -162,3 +162,6 @@ textarea::placeholder { color: #737580; }
 }
 
 .build-version { position: fixed; right: 12px; bottom: 10px; z-index: 5; color: #6b6d78; font-size: 11px; letter-spacing: .04em; pointer-events: none; }
+.voice-picker { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 22px; color: #858691; font-size: 12px; letter-spacing: .04em; }
+.voice-picker select { max-width: 78vw; padding: 9px 12px; border: 1px solid #2c2d36; border-radius: 999px; background: #15161c; color: #f2f0e8; font: inherit; font-size: 13px; }
+.voice-picker select:focus-visible { outline: 2px solid #f5d90a; outline-offset: 2px; }

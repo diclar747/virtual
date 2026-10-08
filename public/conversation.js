@@ -5,6 +5,13 @@ const subtitle = document.querySelector('#voiceSubtitle');
 const audio = new Audio();
 const history = [];
 const UPLOAD_RATE = 16000;
+const voiceSelect = document.querySelector('#voiceSelect');
+// Storage can be blocked (private windows); the selector then simply starts on the default voice.
+try {
+  const savedVoice = localStorage.getItem('voice');
+  if (savedVoice && [...voiceSelect.options].some(option => option.value === savedVoice)) voiceSelect.value = savedVoice;
+} catch { /* keep the default */ }
+voiceSelect.addEventListener('change', () => { try { localStorage.setItem('voice', voiceSelect.value); } catch { /* not remembered */ } });
 let active = false;
 let session = 0;
 let turn = 0;
@@ -236,7 +243,7 @@ async function answer(recording, currentTurn) {
     // Transcription, answer and voice travel in one request; each clip plays as soon as it arrives.
     const response = await request('/api/turn', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audio: toBase64(recording), messages: history.slice(-12) }),
+      body: JSON.stringify({ audio: toBase64(recording), messages: history.slice(-12), voice: voiceSelect.value }),
     }, controller.signal);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -271,6 +278,30 @@ async function answer(recording, currentTurn) {
   }
 }
 
+// The call opens with a fixed greeting, so the model never has to introduce itself.
+async function greet() {
+  const controller = new AbortController();
+  pending = controller;
+  const currentTurn = turn;
+  const current = () => active && currentTurn === turn && !controller.signal.aborted;
+  const text = `Soy ${voiceSelect.selectedOptions[0].dataset.article} asistente de Personal, ¿en qué le ayudo?`;
+  try {
+    const response = await request('/api/speak', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice: voiceSelect.value }),
+    }, controller.signal);
+    if (!response.ok) throw new Error('No pude generar la voz');
+    const clip = await response.blob();
+    if (!current()) return;
+    playback = { text, turn: currentTurn };
+    if (!await play(clip, controller.signal) || !current()) return;
+    history.push({ role: 'assistant', content: text });
+  } catch { /* Without the greeting the conversation still works. */ }
+  if (!current()) return;
+  playback = null; pending = null; speaking = false;
+  if (!capturing) show('listening', 'Te escucho');
+}
+
 audio.onplaying = () => {
   if (priming || !active) return;
   if (!speaking) { speakingSince = performance.now(); echo = 0; }
@@ -301,6 +332,7 @@ trigger.addEventListener('click', async () => {
     processor.onaudioprocess = onMicrophone;
     noise = .002;
     show('listening', 'Te escucho');
+    if (!history.length) greet();
   } catch (error) {
     if (currentSession !== session) return;
     priming = false;
