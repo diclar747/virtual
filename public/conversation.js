@@ -159,7 +159,8 @@ function onMicrophone(event) {
     cancelResponse();
     show('listening', 'Te escucho');
   }
-  if (now - lastVoice > 600 || now - utteranceStart > 25000) {
+  // The question is sent after a short silence; if it was only a pause, the next words are merged in.
+  if (now - lastVoice > (confirmed ? 350 : 600) || now - utteranceStart > 25000) {
     const heard = samples;
     samples = []; capturing = false; speechFrames = 0; preRoll = [];
     if (!confirmed) {
