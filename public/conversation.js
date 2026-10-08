@@ -22,6 +22,10 @@ let noise = .002;
 let preRoll = [];
 let samples = [];
 let resumable = null;
+let echo = 0;
+let capturePeak = 0;
+let speakingSince = 0;
+let lastLoud = 0;
 
 function show(mode, text, detail = '') {
   orb.dataset.state = mode;
@@ -50,7 +54,7 @@ function downsample(chunks, sampleRate) {
   return { data: output, sampleRate: UPLOAD_RATE };
 }
 
-function wav(chunks, inputRate) {
+function wavBytes(chunks, inputRate) {
   const { data, sampleRate } = downsample(chunks, inputRate);
   const length = data.length;
   const buffer = new ArrayBuffer(44 + length * 2);
@@ -68,7 +72,25 @@ function wav(chunks, inputRate) {
     view.setInt16(offset, value < 0 ? value * 32768 : value * 32767, true);
     offset += 2;
   }
-  return new Blob([buffer], { type: 'audio/wav' });
+  return buffer;
+}
+
+function wav(chunks, inputRate) {
+  return new Blob([wavBytes(chunks, inputRate)], { type: 'audio/wav' });
+}
+
+function toBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
+  return btoa(binary);
+}
+
+function fromBase64(data, type) {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type });
 }
 
 function cancelResponse() {
@@ -106,38 +128,48 @@ function onMicrophone(event) {
   const frameMs = chunk.length / context.sampleRate * 1000;
   const rms = Math.sqrt(chunk.reduce((total, value) => total + value * value, 0) / chunk.length);
   orb.style.setProperty('--voice-energy', Math.min(rms * 6, .15));
-  // While the assistant talks the microphone also hears it, so interrupting needs a clearly louder voice.
-  const threshold = speaking ? Math.max(.03, noise * 5) : Math.max(.008, noise * 3);
-  const voiced = rms > threshold;
+  // While the assistant talks the microphone also hears it. Its loudest recent echo is learned
+  // continuously, so a voice only slightly above that echo is enough to interrupt.
+  const settling = speaking && now - speakingSince < 300;
+  const threshold = speaking ? Math.max(.012, noise * 3, echo * 1.6) : Math.max(.008, noise * 3);
+  const voiced = !settling && rms > threshold;
   if (!capturing) {
     preRoll.push(chunk);
     while (preRoll.length > 6) preRoll.shift();
-    speechFrames = voiced ? speechFrames + 1 : 0;
+    if (voiced) { speechFrames += 1; lastLoud = now; }
+    // Over the assistant's voice the user is heard in bursts, so loud frames need not be consecutive,
+    // and what follows a loud frame is not learned as echo because it is probably the user.
+    else if (!speaking || now - lastLoud > 250) speechFrames = 0;
+    if (!voiced && speaking && now - lastLoud > 250) echo = Math.max(rms, echo * .99);
     if (!voiced && !speaking) noise = Math.max(.0005, Math.min(.02, noise * .98 + rms * .02));
     if (speechFrames < 2) return;
     capturing = true; confirmed = false; samples = preRoll.slice(); preRoll = [];
-    voicedMs = speechFrames * frameMs;
+    voicedMs = speechFrames * frameMs; capturePeak = rms;
     utteranceStart = lastVoice = now;
     if (!speaking && !pending) show('listening', 'Te escucho');
     return;
   }
   samples.push(chunk);
-  if (voiced) { lastVoice = now; voicedMs += frameMs; }
-  // A cough, a click or the assistant's own echo must not cancel an answer: only sustained speech does.
-  if (!confirmed && voicedMs >= (speaking ? 400 : pending ? 280 : 200)) {
+  if (voiced) { lastVoice = now; voicedMs += frameMs; capturePeak = Math.max(capturePeak, rms); }
+  // A cough, a click or a burst of echo must not cancel an answer: only sustained speech does.
+  if (!confirmed && voicedMs >= (speaking || pending ? 240 : 160)) {
     confirmed = true;
     // The user paused and kept talking before the answer arrived: treat both parts as one question.
     if (pending && !speaking && resumable) samples = resumable.concat(samples);
     cancelResponse();
     show('listening', 'Te escucho');
   }
-  if (now - lastVoice > 700 || now - utteranceStart > 25000) {
+  if (now - lastVoice > 600 || now - utteranceStart > 25000) {
     const heard = samples;
     samples = []; capturing = false; speechFrames = 0; preRoll = [];
-    if (!confirmed) return;
+    if (!confirmed) {
+      // It was not the user after all, so it was the assistant's own voice leaking in.
+      if (speaking) echo = Math.max(echo, capturePeak);
+      return;
+    }
     confirmed = false;
     resumable = heard;
-    answer(wav(heard, context.sampleRate), turn);
+    answer(wavBytes(heard, context.sampleRate), turn);
   }
 }
 
@@ -154,36 +186,6 @@ async function request(path, options, signal) {
   const link = linkedSignal(signal, 45000);
   try { return await fetch(path, { ...options, signal: link.signal }); }
   finally { link.release(); }
-}
-
-async function readJson(path, options, signal) {
-  const response = await request(path, options, signal);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'No pude responder en este momento');
-  return data;
-}
-
-async function fetchVoice(text, signal) {
-  const response = await request('/api/speak', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-  }, signal);
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error || 'No pude generar la voz');
-  }
-  return response.blob();
-}
-
-// The first sentence is voiced on its own so playback starts without waiting for the whole answer.
-function speechParts(text) {
-  const boundary = /[.!?…]+\s+(?=[A-ZÁÉÍÓÚÑ¿¡])/g;
-  let match;
-  while ((match = boundary.exec(text))) {
-    const end = match.index + match[0].length;
-    if (end >= 25 && text.length - end >= 15) return [text.slice(0, end).trim(), text.slice(end).trim()];
-  }
-  return [text];
 }
 
 function play(clip, signal) {
@@ -203,43 +205,66 @@ function play(clip, signal) {
   });
 }
 
-async function answer(blob, currentTurn) {
+async function answer(recording, currentTurn) {
   const controller = new AbortController();
   pending = controller;
   const current = () => active && currentTurn === turn && !controller.signal.aborted;
-  let reply = '';
+  let question = '', reply = '', buffer = '';
+  let playing = Promise.resolve(true);
+  const handle = item => {
+    if (item.type === 'transcript') question = item.text;
+    else if (item.type === 'reply') reply = item.text;
+    else if (item.type === 'error') throw new Error(item.message);
+    else if (item.type === 'audio') {
+      const clip = fromBase64(item.data, item.mime);
+      playing = playing.then(ok => {
+        if (!ok || !current()) return false;
+        if (!playback) {
+          // From here the question is answered, so a later pause is a new turn and not a continuation.
+          resumable = null;
+          history.push({ role: 'user', content: question });
+          playback = { text: reply, turn: currentTurn };
+        }
+        return play(clip, controller.signal);
+      });
+      playing.catch(() => {});
+    }
+  };
   try {
     show('thinking', 'Un momento');
-    const form = new FormData(); form.append('file', blob, 'consulta.wav');
-    const transcript = await readJson('/api/transcribe', { method: 'POST', body: form }, controller.signal);
-    if (!current()) return;
-    const question = transcript.text?.trim();
-    if (!question) { pending = null; resumable = null; show('listening', 'Te escucho'); return; }
-    // The transcript is internal context only, never rendered on screen.
-    const result = await readJson('/api/chat', {
+    // Transcription, answer and voice travel in one request; each clip plays as soon as it arrives.
+    const response = await request('/api/turn', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: [...history, { role: 'user', content: question }].slice(-12) }),
+      body: JSON.stringify({ audio: toBase64(recording), messages: history.slice(-12) }),
     }, controller.signal);
-    if (!current()) return;
-    const clips = speechParts(result.message).map(part => fetchVoice(part, controller.signal));
-    clips.forEach(clip => clip.catch(() => {}));
-    for (const clip of clips) {
-      const voice = await clip;
-      if (!current()) return;
-      if (!reply) {
-        // From here the question is answered, so a later pause is a new turn and not a continuation.
-        reply = result.message; resumable = null;
-        history.push({ role: 'user', content: question });
-        playback = { text: reply, turn: currentTurn };
-      }
-      if (!await play(voice, controller.signal) || !current()) return;
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || 'No pude responder en este momento');
     }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let end;
+      while ((end = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, end).trim();
+        buffer = buffer.slice(end + 1);
+        if (line) handle(JSON.parse(line));
+      }
+      if (done) break;
+    }
+    if (!current()) return;
+    // The transcript is internal context only, never rendered on screen.
+    if (!question) { pending = null; resumable = null; show('listening', 'Te escucho'); return; }
+    if (!await playing || !current()) return;
+    if (!playback) throw new Error('No recibí la voz de la respuesta');
     history.push({ role: 'assistant', content: reply });
     playback = null; pending = null; speaking = false;
     if (!capturing) show('listening', 'Te escucho');
   } catch (error) {
     if (!current()) return;
-    if (reply) history.push({ role: 'assistant', content: reply });
+    if (playback) history.push({ role: 'assistant', content: reply });
     pending = null; playback = null; resumable = null; speaking = false;
     show('listening', error.name === 'NotAllowedError' ? 'Tocá para habilitar la voz' : 'No pude responder', error.name === 'NotAllowedError' ? '' : 'Podés intentar de nuevo');
   }
@@ -247,6 +272,7 @@ async function answer(blob, currentTurn) {
 
 audio.onplaying = () => {
   if (priming || !active) return;
+  if (!speaking) { speakingSince = performance.now(); echo = 0; }
   speaking = true;
   if (!capturing) show('speaking', 'Podés interrumpirme hablando');
 };
@@ -255,6 +281,7 @@ trigger.addEventListener('click', async () => {
   if (active) return stop();
   active = true; const currentSession = ++session;
   show('listening', 'Activando el micrófono');
+  fetch('/api/warm', { method: 'POST' }).catch(() => {});
   try {
     // A valid silent WAV unlocks this audio element from the user's gesture.
     priming = true;

@@ -153,15 +153,21 @@ try {
 
 const SYSTEM_PROMPT = `${knowledge}\n\nRecordá: respondé en español claro, con voseo paraguayo cuando corresponda. No inventes precios, saldos, cobertura, reclamos ni acciones realizadas. No pidas PIN, PUK, CVV, OTP, contraseñas ni códigos. Si la consulta requiere acceso a una cuenta o una gestión, explicá el límite y derivá al canal oficial. Esta es una demostración independiente: no afirmes ser Personal oficial.`;
 
-const VOICE_STYLE = `Esta interacción es una llamada de voz: lo que escribas se lee en voz alta tal cual.
-- Hablá como una persona paraguaya amable por teléfono: frases cortas y cotidianas, con voseo. Como máximo dos frases y unas 35 palabras por turno.
-- Solo en el primer turno saludá con calidez y presentate en pocas palabras; después no te presentes ni saludes de nuevo.
-- Nada de Markdown, listas, paréntesis, punto y coma, barras ni abreviaturas. Escribí "guaraníes", "megas" y "gigas", nunca "Gs.", "Mbps" ni "GB".
+const VOICE_STYLE = `## Cómo hablar (esto manda sobre todo lo anterior)
+
+Estás en una llamada telefónica: todo lo que escribas se lee en voz alta tal cual.
+
+- Hablá como una persona paraguaya amable y relajada, de vos. Usá oraciones completas y naturales, con sus artículos y conectores, como cuando conversás. Nunca escribas en estilo telegrama ni en forma de instrucciones sueltas.
+- Sé breve: una o dos oraciones, unas treinta palabras como máximo. Empezá con una reacción corta y humana cuando venga al caso ("Dale", "Uy, qué macana", "Claro").
+- En el primer turno saludá con calidez y decí en pocas palabras que sos el asistente de consulta sobre Personal. Después no te presentes ni saludes de nuevo.
+- Nada de listas, símbolos, paréntesis, barras ni abreviaturas. Escribí "guaraníes", "megas" y "gigas".
 - Decí los precios como se hablan: "ciento cincuenta mil guaraníes".
-- No enumeres todo: mencioná una o dos opciones que más le sirvan y ofrecé contar el resto.
-- La aclaración de fecha y vigencia de los precios decila una sola vez en la conversación, de forma breve ("según lo publicado"); no la repitas en cada turno.
-- Teléfonos: da solo el que haga falta y escribilo en cifras separadas por espacios, por ejemplo "0 9 7 1, 1 0 0, 0 0 0"; el *111 escribilo así.
-- Hacé una sola pregunta por turno.`;
+- No enumeres todo: contá una o dos opciones y ofrecé seguir.
+- La aclaración de que los precios son los publicados decila una sola vez en la conversación y cortita ("según lo publicado"), sin decir la fecha.
+- Si das un teléfono, da uno solo. El asterisco ciento once escribilo "*111".
+- Terminá con una sola pregunta corta para seguir la charla.
+
+Ejemplo de tono. Usuario: "No me anda internet en casa". Vos: "Uy, qué macana. ¿Te pasa en todos los aparatos o solamente en uno?"`;
 
 // Whisper invents these captions when it receives silence or background noise.
 const TRANSCRIPT_NOISE = /subt[ií]tulos|amara\.org|gracias por ver|suscr[ií]b/i;
@@ -231,29 +237,101 @@ async function callNiro(endpoint, options = {}) {
   return data;
 }
 
+function cleanMessages(incoming) {
+  return (Array.isArray(incoming) ? incoming : [])
+    .filter((message) => ["user", "assistant"].includes(message?.role) && typeof message.content === "string")
+    .slice(-12)
+    .map((message) => ({ role: message.role, content: message.content.slice(0, 8000) }));
+}
+
+async function complete(messages) {
+  const voiceMessages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n\n${VOICE_STYLE}` }, ...messages];
+  const data = ROUTER_API_KEY ? await routerChat(voiceMessages) : await callNiro("/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: voiceMessages }),
+  });
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("Niro no devolvió contenido de respuesta.");
+  return { content, usage: data.usage || null };
+}
+
+async function speak(text) {
+  if (ROUTER_API_KEY && ROUTER_TTS_MODEL) return routerVoice(text);
+  return { audio: process.env.OPENAI_API_KEY ? await naturalVoice(text) : await synthesizeVoice(text), contentType: 'audio/wav' };
+}
+
+async function transcribe(body, contentType) {
+  const data = await callNiro("/audio/transcriptions", { method: "POST", headers: contentType ? { "Content-Type": contentType } : {}, body });
+  if (typeof data?.text !== "string") throw new Error("Niro no devolvió una transcripción.");
+  return { text: TRANSCRIPT_NOISE.test(data.text) ? "" : data.text.trim(), seconds: data.seconds || null };
+}
+
+// The first sentence is voiced on its own so playback starts without waiting for the whole answer.
+function speechParts(text) {
+  const boundary = /[.!?…]+\s+(?=[A-ZÁÉÍÓÚÑ¿¡])/g;
+  let match;
+  while ((match = boundary.exec(text))) {
+    const end = match.index + match[0].length;
+    if (end >= 25 && text.length - end >= 15) return [text.slice(0, end).trim(), text.slice(end).trim()];
+  }
+  return [text];
+}
+
+// The first answer after a quiet period takes several seconds upstream. Opening the conversation
+// triggers a throwaway request so that delay is spent before the user finishes speaking.
+let warmedAt = 0;
+function warmUp() {
+  if (Date.now() - warmedAt < 120000) return;
+  warmedAt = Date.now();
+  complete([{ role: "user", content: "Hola" }]).catch(() => { warmedAt = 0; });
+}
+
+// One request per spoken turn: every extra round trip from the phone adds audible delay.
+// Results are streamed as JSON lines so the browser can start playing the first sentence at once.
+async function handleTurn(req, res) {
+  let streaming = false;
+  const send = (item) => res.write(`${JSON.stringify(item)}\n`);
+  try {
+    const input = JSON.parse((await readBody(req, 3 * 1024 * 1024)).toString("utf8"));
+    const audio = Buffer.from(typeof input.audio === "string" ? input.audio : "", "base64");
+    if (!audio.length) return json(res, 400, { error: "Falta el audio de la consulta." });
+    const form = new FormData();
+    form.append("file", new Blob([audio], { type: "audio/wav" }), "consulta.wav");
+    const { text: question } = await transcribe(form);
+    res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" });
+    streaming = true;
+    send({ type: "transcript", text: question });
+    if (!question) return res.end();
+    const { content } = await complete([...cleanMessages(input.messages), { role: "user", content: question }].slice(-12));
+    send({ type: "reply", text: content });
+    const clips = speechParts(content).map((part) => speak(part));
+    clips.forEach((clip) => clip.catch(() => {}));
+    for (const clip of clips) {
+      const voice = await clip;
+      send({ type: "audio", mime: voice.contentType, data: voice.audio.toString("base64") });
+    }
+    send({ type: "done" });
+    res.end();
+  } catch (error) {
+    const message = error.message || "No se pudo completar la consulta.";
+    if (!streaming) return json(res, error.code === "missing_key" ? 503 : 502, { error: message });
+    send({ type: "error", message });
+    res.end();
+  }
+}
+
 async function handleChat(req, res) {
   try {
     const input = await readJson(req);
-    const incoming = Array.isArray(input.messages) ? input.messages : [];
-    const messages = incoming
-      .filter((message) => ["user", "assistant"].includes(message?.role) && typeof message.content === "string")
-      .slice(-12)
-      .map((message) => ({ role: message.role, content: message.content.slice(0, 8000) }));
+    const messages = cleanMessages(input.messages);
 
     if (!messages.some((message) => message.role === "user")) {
       return json(res, 400, { error: "Escribí un mensaje para comenzar." });
     }
 
-    const voiceMessages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n${VOICE_STYLE}` }, ...messages];
-    const data = ROUTER_API_KEY ? await routerChat(voiceMessages) : await callNiro("/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: voiceMessages }),
-    });
-
-    const content = data?.choices?.[0]?.message?.content;
-    if (!content) throw new Error("Niro no devolvió contenido de respuesta.");
-    json(res, 200, { message: content, usage: data.usage || null });
+    const { content, usage } = await complete(messages);
+    json(res, 200, { message: content, usage });
   } catch (error) {
     const status = error.code === "missing_key" ? 503 : error.status && error.status < 500 ? error.status : 502;
     json(res, status, { error: error.message || "No se pudo completar la consulta." });
@@ -267,13 +345,7 @@ async function handleTranscription(req, res) {
       return json(res, 400, { error: "El audio debe enviarse como multipart/form-data." });
     }
     const body = await readBody(req);
-    const data = await callNiro("/audio/transcriptions", {
-      method: "POST",
-      headers: { "Content-Type": contentType },
-      body,
-    });
-    if (typeof data?.text !== "string") throw new Error("Niro no devolvió una transcripción.");
-    json(res, 200, { text: TRANSCRIPT_NOISE.test(data.text) ? "" : data.text, seconds: data.seconds || null });
+    json(res, 200, await transcribe(body, contentType));
   } catch (error) {
     const status = error.code === "missing_key" ? 503 : error.status && error.status < 500 ? error.status : 502;
     json(res, status, { error: error.message || "No se pudo transcribir el audio." });
@@ -300,9 +372,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/speak") {
       const input = await readJson(req);
       if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 8000) return json(res, 400, { error: 'Texto de voz inválido.' });
-      const speech = ROUTER_API_KEY && ROUTER_TTS_MODEL
-        ? await routerVoice(input.text)
-        : { audio: process.env.OPENAI_API_KEY ? await naturalVoice(input.text) : await synthesizeVoice(input.text), contentType: 'audio/wav' };
+      const speech = await speak(input.text);
       const { audio, contentType } = speech;
       res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': audio.length, 'Cache-Control': 'no-store' });
       return res.end(audio);
@@ -311,6 +381,8 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, niroConfigured: Boolean(NIRO_API_KEY), apiBase: NIRO_API_BASE, chatProvider: ROUTER_API_KEY ? 'router' : 'niro', chatModel: ROUTER_API_KEY ? ROUTER_CHAT_MODEL : 'auto', voiceProvider: ROUTER_API_KEY && ROUTER_TTS_MODEL ? 'router' : process.env.OPENAI_API_KEY ? 'openai' : 'windows', voiceModel: ROUTER_TTS_MODEL || null });
     }
     if (req.method === "POST" && url.pathname === "/api/chat") return await handleChat(req, res);
+    if (req.method === "POST" && url.pathname === "/api/turn") return await handleTurn(req, res);
+    if (req.method === "POST" && url.pathname === "/api/warm") { warmUp(); return json(res, 202, { ok: true }); }
     if (req.method === "POST" && url.pathname === "/api/transcribe") return await handleTranscription(req, res);
     if (req.method === "GET") return await serveStatic(url.pathname, res);
     json(res, 405, { error: "Método no permitido." });
