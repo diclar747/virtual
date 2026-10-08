@@ -1,0 +1,17 @@
+{
+  "name": "Asistente de Personal",
+  "short_name": "Asistente",
+  "description": "Conversá por voz con el asistente de Personal.",
+  "lang": "es-PY",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#08090d",
+  "theme_color": "#08090d",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

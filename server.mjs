@@ -145,6 +145,8 @@ const MIME_TYPES = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
+  ".png": "image/png",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 let knowledge = "";
@@ -247,7 +249,28 @@ function cleanMessages(incoming) {
     .map((message) => ({ role: message.role, content: message.content.slice(0, 8000) }));
 }
 
-async function complete(messages) {
+// Repeated work is answered from memory: the same sentence in the same voice, or the same
+// question at the same point of a conversation, skips its provider call entirely.
+function remember(cache, limit, lifetime, key, produce) {
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < lifetime) return hit.value;
+  const value = produce();
+  cache.delete(key);
+  cache.set(key, { at: Date.now(), value });
+  value.catch(() => { if (cache.get(key)?.value === value) cache.delete(key); });
+  if (cache.size > limit) cache.delete(cache.keys().next().value);
+  return value;
+}
+const speechCache = new Map();
+const answerCache = new Map();
+const HOUR = 60 * 60 * 1000;
+
+function complete(messages) {
+  const key = JSON.stringify(messages.map((message) => [message.role, message.content.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()]));
+  return remember(answerCache, 500, 6 * HOUR, key, () => completeFresh(messages));
+}
+
+async function completeFresh(messages) {
   const voiceMessages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n\n${VOICE_STYLE}` }, ...messages];
   const data = ROUTER_API_KEY ? await routerChat(voiceMessages) : await callNiro("/chat/completions", {
     method: "POST",
@@ -259,7 +282,11 @@ async function complete(messages) {
   return { content, usage: data.usage || null };
 }
 
-async function speak(text, voice) {
+function speak(text, voice) {
+  return remember(speechCache, 300, 24 * HOUR, `${voice}|${text}`, () => speakFresh(text, voice));
+}
+
+async function speakFresh(text, voice) {
   if (ROUTER_API_KEY && ROUTER_TTS_MODEL) return routerVoice(text, voice);
   return { audio: process.env.OPENAI_API_KEY ? await naturalVoice(text) : await synthesizeVoice(text), contentType: 'audio/wav' };
 }
@@ -287,7 +314,7 @@ let warmedAt = 0;
 function warmUp() {
   if (Date.now() - warmedAt < 120000) return;
   warmedAt = Date.now();
-  complete([{ role: "user", content: "Hola" }]).catch(() => { warmedAt = 0; });
+  completeFresh([{ role: "user", content: "Hola" }]).catch(() => { warmedAt = 0; });
 }
 
 // One request per spoken turn: every extra round trip from the phone adds audible delay.
@@ -355,14 +382,16 @@ async function handleTranscription(req, res) {
   }
 }
 
-async function serveStatic(urlPath, res) {
+async function serveStatic(urlPath, res, versioned = false) {
   const requested = urlPath === "/" ? "/index.html" : urlPath;
   const filePath = path.resolve(PUBLIC_DIR, `.${requested}`);
   if (!filePath.startsWith(`${PUBLIC_DIR}${path.sep}`)) return json(res, 403, { error: "Ruta no permitida." });
   try {
     const body = await readFile(filePath);
     const extension = path.extname(filePath).toLowerCase();
-    res.writeHead(200, { "Content-Type": MIME_TYPES[extension] || "application/octet-stream", "Cache-Control": "no-store" });
+    // Files requested with ?v= never change under that address, so devices may keep them for good.
+    // Everything else stays uncached: the CDN would otherwise hold sw.js and delay every release.
+    res.writeHead(200, { "Content-Type": MIME_TYPES[extension] || "application/octet-stream", "Cache-Control": versioned ? "public, max-age=31536000, immutable" : "no-store" });
     res.end(body);
   } catch {
     json(res, 404, { error: "No encontrado." });
@@ -387,7 +416,14 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/turn") return await handleTurn(req, res);
     if (req.method === "POST" && url.pathname === "/api/warm") { warmUp(); return json(res, 202, { ok: true }); }
     if (req.method === "POST" && url.pathname === "/api/transcribe") return await handleTranscription(req, res);
-    if (req.method === "GET") return await serveStatic(url.pathname, res);
+    if (req.method === "GET" && url.pathname === "/api/speak") {
+      const text = url.searchParams.get("text") || "";
+      if (!text.trim() || text.length > 300) return json(res, 400, { error: "Texto de voz inválido." });
+      const { audio, contentType } = await speak(text, url.searchParams.get("voice"));
+      res.writeHead(200, { "Content-Type": contentType, "Content-Length": audio.length, "Cache-Control": "public, max-age=604800" });
+      return res.end(audio);
+    }
+    if (req.method === "GET") return await serveStatic(url.pathname, res, url.searchParams.has("v"));
     json(res, 405, { error: "Método no permitido." });
   } catch (error) {
     json(res, 500, { error: error.message || "Error interno." });

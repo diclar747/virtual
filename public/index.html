@@ -2,13 +2,21 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#08090d" />
-    <title>Personal Paraguay · Asistente virtual</title>
+    <title>Asistente de Personal</title>
+    <meta name="description" content="Conversá por voz con el asistente de Personal." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Asistente" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20261009-7" />
   </head>
   <body class="voice-only">
     <div class="noise"></div>
@@ -71,6 +79,7 @@
 
       <section class="orb-panel" aria-label="Interacción por voz">
         <div class="orb-panel-top"><span>Modo conversación</span><span class="orb-status" id="orbStatus">En espera</span></div>
+        <div class="app-title">Asistente de <em>Personal</em></div>
         <div class="orb-stage">
           <div class="orbit orbit-one"></div>
           <div class="orbit orbit-two"></div>
@@ -101,6 +110,7 @@
             <option value="en-US-AvaMultilingualNeural" data-article="la">Ava · mujer, multilingüe</option>
           </select>
         </label>
+        <button type="button" class="install-button" id="installButton" hidden>Instalar app</button>
         <div class="voice-controls">
           <button type="button" class="round-control active" id="speakerButton" aria-label="Activar o desactivar voz" title="Activar o desactivar voz">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4H4Z" /><path d="M16 9.5a4 4 0 0 1 0 5M18.5 7a7.5 7.5 0 0 1 0 10" /></svg>
@@ -112,8 +122,8 @@
     </main>
 
     <footer class="footer"><span>Demostración independiente</span><span class="footer-separator">•</span><span>Información pública de Personal Paraguay</span></footer>
-    <div class="build-version">Versión 9 oct · 6</div>
+    <div class="build-version">Versión 9 oct · 7</div>
 
-    <script src="/conversation.js?v=20261009-6" defer></script>
+    <script src="/conversation.js?v=20261009-7" defer></script>
   </body>
 </html>

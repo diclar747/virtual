@@ -165,3 +165,9 @@ textarea::placeholder { color: #737580; }
 .voice-picker { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 22px; color: #858691; font-size: 12px; letter-spacing: .04em; }
 .voice-picker select { max-width: 78vw; padding: 9px 12px; border: 1px solid #2c2d36; border-radius: 999px; background: #15161c; color: #f2f0e8; font: inherit; font-size: 13px; }
 .voice-picker select:focus-visible { outline: 2px solid #f5d90a; outline-offset: 2px; }
+.app-title { color: #f7f5ef; font-family: "Space Grotesk", sans-serif; font-size: clamp(22px, 6vw, 30px); font-weight: 600; letter-spacing: -.04em; text-align: center; }
+.app-title em { color: #f8c526; font-style: normal; }
+.install-button { display: block; margin: 18px auto 0; padding: 10px 20px; border: 0; border-radius: 999px; background: #f8c526; color: #181300; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.install-button[hidden] { display: none; }
+.install-button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+@media (display-mode: standalone) { .voice-only { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); } }

@@ -12,6 +12,7 @@ try {
   if (savedVoice && [...voiceSelect.options].some(option => option.value === savedVoice)) voiceSelect.value = savedVoice;
 } catch { /* keep the default */ }
 voiceSelect.addEventListener('change', () => { try { localStorage.setItem('voice', voiceSelect.value); } catch { /* not remembered */ } });
+voiceSelect.addEventListener('change', () => fetch(greetingUrl()).catch(() => {}));
 let active = false;
 let session = 0;
 let turn = 0;
@@ -278,18 +279,24 @@ async function answer(recording, currentTurn) {
   }
 }
 
+function greetingText() {
+  return `Soy ${voiceSelect.selectedOptions[0].dataset.article} asistente de Personal, ¿en qué le ayudo?`;
+}
+
+// A plain GET lets the service worker keep the greeting, so it plays without waiting for the network.
+function greetingUrl() {
+  return `/api/speak?voice=${encodeURIComponent(voiceSelect.value)}&text=${encodeURIComponent(greetingText())}`;
+}
+
 // The call opens with a fixed greeting, so the model never has to introduce itself.
 async function greet() {
   const controller = new AbortController();
   pending = controller;
   const currentTurn = turn;
   const current = () => active && currentTurn === turn && !controller.signal.aborted;
-  const text = `Soy ${voiceSelect.selectedOptions[0].dataset.article} asistente de Personal, ¿en qué le ayudo?`;
+  const text = greetingText();
   try {
-    const response = await request('/api/speak', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice: voiceSelect.value }),
-    }, controller.signal);
+    const response = await request(greetingUrl(), {}, controller.signal);
     if (!response.ok) throw new Error('No pude generar la voz');
     const clip = await response.blob();
     if (!current()) return;
@@ -340,4 +347,22 @@ trigger.addEventListener('click', async () => {
   }
 });
 window.addEventListener('pagehide', stop);
+
+// Installable app: the service worker keeps the page, fonts and greeting on the device.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(() => fetch(greetingUrl())).catch(() => {});
+}
+const installButton = document.querySelector('#installButton');
+let installPrompt;
+window.addEventListener('beforeinstallprompt', event => {
+  event.preventDefault();
+  installPrompt = event;
+  installButton.hidden = false;
+});
+installButton.addEventListener('click', async () => {
+  installButton.hidden = true;
+  await installPrompt?.prompt();
+  installPrompt = null;
+});
+window.addEventListener('appinstalled', () => { installButton.hidden = true; });
 show('idle', 'Tocá para conversar');
