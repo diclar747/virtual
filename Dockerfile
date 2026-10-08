@@ -2,7 +2,10 @@ FROM node:24-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=4173
-COPY --chown=node:node package.json server.mjs ./
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+COPY --chown=node:node server.mjs db.mjs ./
+COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node public ./public
 COPY --chown=node:node knowledge ./knowledge
 USER node

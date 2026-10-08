@@ -279,8 +279,13 @@ async function answer(recording, currentTurn) {
   }
 }
 
+// The greeting is one of the prompts kept in the database; this text is only the fallback.
+let greetingTemplate = 'Soy {articulo} asistente de Personal, ¿en qué le ayudo?';
+const greetingLoaded = fetch('/api/config').then(response => response.json())
+  .then(config => { if (config.greeting) greetingTemplate = config.greeting; }).catch(() => {});
+
 function greetingText() {
-  return `Soy ${voiceSelect.selectedOptions[0].dataset.article} asistente de Personal, ¿en qué le ayudo?`;
+  return greetingTemplate.replace('{articulo}', voiceSelect.selectedOptions[0].dataset.article);
 }
 
 // A plain GET lets the service worker keep the greeting, so it plays without waiting for the network.
@@ -350,7 +355,7 @@ window.addEventListener('pagehide', stop);
 
 // Installable app: the service worker keeps the page, fonts and greeting on the device.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').then(() => fetch(greetingUrl())).catch(() => {});
+  navigator.serviceWorker.register('/sw.js').then(() => greetingLoaded).then(() => fetch(greetingUrl())).catch(() => {});
 }
 const installButton = document.querySelector('#installButton');
 let installPrompt;

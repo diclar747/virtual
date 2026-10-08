@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import * as db from "./db.mjs";
 
 function synthesizeVoice(text) {
   if (process.platform !== 'win32') throw new Error('Configurá ROUTER_API_KEY y ROUTER_TTS_MODEL para generar voz en el servidor Linux.');
@@ -156,7 +157,7 @@ try {
   knowledge = "No se pudo cargar la base de conocimiento local.";
 }
 
-const SYSTEM_PROMPT = `${knowledge}\n\nRecordá: respondé en español claro, con voseo paraguayo cuando corresponda. No inventes precios, saldos, cobertura, reclamos ni acciones realizadas. No pidas PIN, PUK, CVV, OTP, contraseñas ni códigos. Si la consulta requiere acceso a una cuenta o una gestión, explicá el límite y derivá al canal oficial. Esta es una demostración independiente: no afirmes ser Personal oficial.`;
+const RULES = `Recordá: respondé en español claro, con voseo paraguayo cuando corresponda. No inventes precios, saldos, cobertura, reclamos ni acciones realizadas. No pidas PIN, PUK, CVV, OTP, contraseñas ni códigos. Si la consulta requiere acceso a una cuenta o una gestión, explicá el límite y derivá al canal oficial. Esta es una demostración independiente: no afirmes ser Personal oficial.`;
 
 const VOICE_STYLE = `## Cómo hablar (esto manda sobre todo lo anterior)
 
@@ -173,6 +174,18 @@ Estás en una llamada telefónica: todo lo que escribas se lee en voz alta tal c
 - Terminá con una sola pregunta corta para seguir la charla.
 
 Ejemplo de tono. Usuario: "No me anda internet en casa". Vos: "Uy, qué macana. ¿Te pasa en todos los aparatos o solamente en uno?"`;
+
+const GREETING = "Soy {articulo} asistente de Personal, ¿en qué le ayudo?";
+
+// The prompts are stored in the database (table "prompts") so they can be edited without a
+// release; these texts are only the first-time defaults and the fallback when it is unreachable.
+const DEFAULT_PROMPTS = {
+  system: { content: knowledge, description: "Quién es el asistente, sus reglas y el resumen base de servicios." },
+  rules: { content: RULES, description: "Límites de seguridad que se repiten en cada respuesta." },
+  voice_style: { content: VOICE_STYLE, description: "Cómo debe hablar en la llamada de voz." },
+  greeting: { content: GREETING, description: "Saludo inicial. {articulo} se reemplaza por la/el según la voz." },
+};
+let prompts = Object.fromEntries(Object.entries(DEFAULT_PROMPTS).map(([key, value]) => [key, value.content]));
 
 // Whisper invents these captions when it receives silence or background noise.
 const TRANSCRIPT_NOISE = /subt[ií]tulos|amara\.org|gracias por ver|suscr[ií]b/i;
@@ -271,7 +284,16 @@ function complete(messages) {
 }
 
 async function completeFresh(messages) {
-  const voiceMessages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n\n${VOICE_STYLE}` }, ...messages];
+  // The passages of personal.com.py closest to what was just asked travel with the question.
+  // The system message must stay identical between calls: the provider takes about three
+  // seconds longer whenever it changes, so nothing variable may be added to it.
+  const asked = messages.filter((message) => message.role === "user").slice(-2).map((message) => message.content).join(" ");
+  const found = await db.search(asked);
+  const last = messages.at(-1);
+  const grounded = found.length && last?.role === "user"
+    ? [...messages.slice(0, -1), { role: "user", content: `[Información publicada en personal.com.py. Es tu fuente principal: si contradice tu resumen, vale esta; si no alcanza para responder, decilo.]\n${found.map((passage) => `(${passage.title}${passage.heading ? ` › ${passage.heading}` : ""})\n${passage.content.slice(0, 1100)}`).join("\n\n")}\n\n[Lo que dijo el cliente]\n${last.content}` }]
+    : messages;
+  const voiceMessages = [{ role: 'system', content: `${prompts.system}\n\n${prompts.rules}\n\n${prompts.voice_style}` }, ...grounded];
   const data = ROUTER_API_KEY ? await routerChat(voiceMessages) : await callNiro("/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -409,8 +431,9 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': audio.length, 'Cache-Control': 'no-store' });
       return res.end(audio);
     }
+    if (req.method === "GET" && url.pathname === "/api/config") return json(res, 200, { greeting: prompts.greeting });
     if (req.method === "GET" && url.pathname === "/api/health") {
-      return json(res, 200, { ok: true, niroConfigured: Boolean(NIRO_API_KEY), apiBase: NIRO_API_BASE, chatProvider: ROUTER_API_KEY ? 'router' : 'niro', chatModel: ROUTER_API_KEY ? ROUTER_CHAT_MODEL : 'auto', voiceProvider: ROUTER_API_KEY && ROUTER_TTS_MODEL ? 'router' : process.env.OPENAI_API_KEY ? 'openai' : 'windows', voiceModel: ROUTER_TTS_MODEL || null });
+      return json(res, 200, { ok: true, niroConfigured: Boolean(NIRO_API_KEY), apiBase: NIRO_API_BASE, chatProvider: ROUTER_API_KEY ? 'router' : 'niro', chatModel: ROUTER_API_KEY ? ROUTER_CHAT_MODEL : 'auto', voiceProvider: ROUTER_API_KEY && ROUTER_TTS_MODEL ? 'router' : process.env.OPENAI_API_KEY ? 'openai' : 'windows', voiceModel: ROUTER_TTS_MODEL || null, database: await db.status().catch(() => ({ connected: false })) });
     }
     if (req.method === "POST" && url.pathname === "/api/chat") return await handleChat(req, res);
     if (req.method === "POST" && url.pathname === "/api/turn") return await handleTurn(req, res);
@@ -430,7 +453,25 @@ const server = createServer(async (req, res) => {
   }
 });
 
+// Keeps prompts and site content current: reconnects if the database was down, picks up edited
+// prompts within a minute, and re-reads personal.com.py once a day.
+async function refreshKnowledge() {
+  if (!db.enabled()) return;
+  try {
+    if (!db.isReady() && !await db.connect(DEFAULT_PROMPTS)) return;
+    const next = { ...prompts, ...await db.loadPrompts() };
+    if (JSON.stringify(next) !== JSON.stringify(prompts)) { prompts = next; answerCache.clear(); speechCache.clear(); }
+    const synced = await db.syncIfStale((line) => console.log(line));
+    if (synced) { answerCache.clear(); console.log(`Sitio actualizado: ${synced.pages} páginas, ${synced.passages} pasajes.`); }
+  } catch (error) {
+    console.log(`Base de datos no disponible: ${error.message}`);
+  }
+}
+refreshKnowledge();
+setInterval(refreshKnowledge, 60000).unref();
+
 server.listen(PORT, () => {
   console.log(`Personal Asistente disponible en http://localhost:${PORT}`);
+  console.log(`Base de datos: ${db.enabled() ? "configurada" : "sin configurar (se usan los archivos locales)"}`);
   console.log(`Niro API: ${NIRO_API_BASE} · clave configurada: ${NIRO_API_KEY ? "sí" : "no"}`);
 });

@@ -19,7 +19,10 @@ ROUTER_API_BASE=https://router.cnid.com.py/v1
 ROUTER_API_KEY=REEMPLAZAR
 ROUTER_CHAT_MODEL=cx/gpt-5.6-luna
 ROUTER_TTS_MODEL=edge-tts/es-PY-TaniaNeural
+DATABASE_URL=postgres://postgres:CLAVE@NOMBRE-DEL-SERVICIO-POSTGRES:5432/virtual
 ```
+
+`DATABASE_URL` apunta a una base PostgreSQL creada en el mismo proyecto de Dokploy. Al conectarse, la aplicación crea sus tablas, guarda los prompts en `prompts` (se pueden editar ahí y se aplican en un minuto) y copia el contenido público de personal.com.py en `pages` y `passages`, que vuelve a leer una vez por día. `npm run sync` fuerza esa lectura. Sin base de datos sigue funcionando con los archivos de `knowledge/`.
 
 Las claves no se incluyen en Git ni en la imagen Docker. Configurarlas como variables de ejecución, no como argumentos de construcción.
 
