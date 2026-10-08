@@ -1,0 +1,14 @@
+{
+  "name": "personal-paraguay-asistente",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Asistente de consulta por texto y voz para Personal Paraguay usando Niro IA.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+
