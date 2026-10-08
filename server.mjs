@@ -108,7 +108,7 @@ async function routerChat(messages) {
   const response = await fetch(`${ROUTER_API_BASE}/chat/completions`, {
     method: 'POST', signal: AbortSignal.timeout(60000),
     headers: { Authorization: `Bearer ${ROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: ROUTER_CHAT_MODEL, messages, stream: false, reasoning_effort: 'none' }),
+    body: JSON.stringify({ model: ROUTER_CHAT_MODEL, messages, stream: false }),
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error?.message || 'El router no pudo responder.');
