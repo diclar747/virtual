@@ -160,3 +160,5 @@ textarea::placeholder { color: #737580; }
 @media (max-width: 560px) {
   .topbar { height: 70px; padding: 0 5vw; }.connection-pill { font-size: 0; padding: 8px; }.connection-dot { width: 7px; height: 7px; }.app-shell { width: 90vw; padding-top: 32px; }.intro { font-size: 14px; }.conversation { height: 230px; }.orb-panel { min-height: 430px; }.orb-stage { height: 285px; transform: scale(.88); margin: -17px 0; }.voice-title { font-size: 18px; }.footer { line-height: 1.7; }
 }
+
+.build-version { position: fixed; right: 12px; bottom: 10px; z-index: 5; color: #6b6d78; font-size: 11px; letter-spacing: .04em; pointer-events: none; }
