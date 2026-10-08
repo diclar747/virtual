@@ -67,11 +67,31 @@ const ROUTER_API_KEY = process.env.ROUTER_API_KEY || '';
 const ROUTER_CHAT_MODEL = process.env.ROUTER_CHAT_MODEL || 'cx/gpt-5.6-luna';
 const ROUTER_TTS_MODEL = process.env.ROUTER_TTS_MODEL || '';
 
+// Rewrites written shorthand into what a person would say aloud, so the voice does not spell symbols.
+function speechText(text) {
+  return text
+    .replace(/\*(\d+)/g, 'asterisco $1')
+    .replace(/[*_`#>|]+/g, ' ')
+    .replace(/\bGs\.?\s*(\d+(?:\.\d{3})*)/gi, '$1 guaraníes')
+    .replace(/\bGs\.?(?=\s|$)/gi, 'guaraníes')
+    .replace(/(\d+)\s*\/\s*(\d+)\s*Mbps/gi, '$1 megas de bajada y $2 de subida')
+    .replace(/\b1\s*Gbps\b/gi, 'un giga')
+    .replace(/\bGbps\b/gi, 'gigas')
+    .replace(/\bMbps\b/gi, 'megas')
+    .replace(/\bKbps\b/gi, 'kilobits por segundo')
+    .replace(/(\d)\s*GB\b/g, '$1 gigas')
+    .replace(/(\d)\s*h\b/g, '$1 horas')
+    .replace(/Wi[‑-]?Fi/gi, 'wifi')
+    .replace(/\s*[;:]\s+/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function routerVoice(text) {
   const response = await fetch(`${ROUTER_API_BASE}/audio/speech`, {
     method: 'POST', signal: AbortSignal.timeout(45000),
     headers: { Authorization: `Bearer ${ROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: ROUTER_TTS_MODEL, input: text.replace(/\bGs\.?\s*/gi, 'guaraníes ') }),
+    body: JSON.stringify({ model: ROUTER_TTS_MODEL, input: speechText(text) }),
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
@@ -132,6 +152,19 @@ try {
 }
 
 const SYSTEM_PROMPT = `${knowledge}\n\nRecordá: respondé en español claro, con voseo paraguayo cuando corresponda. No inventes precios, saldos, cobertura, reclamos ni acciones realizadas. No pidas PIN, PUK, CVV, OTP, contraseñas ni códigos. Si la consulta requiere acceso a una cuenta o una gestión, explicá el límite y derivá al canal oficial. Esta es una demostración independiente: no afirmes ser Personal oficial.`;
+
+const VOICE_STYLE = `Esta interacción es una llamada de voz: lo que escribas se lee en voz alta tal cual.
+- Hablá como una persona paraguaya amable por teléfono: frases cortas y cotidianas, con voseo. Como máximo dos frases y unas 35 palabras por turno.
+- Solo en el primer turno saludá con calidez y presentate en pocas palabras; después no te presentes ni saludes de nuevo.
+- Nada de Markdown, listas, paréntesis, punto y coma, barras ni abreviaturas. Escribí "guaraníes", "megas" y "gigas", nunca "Gs.", "Mbps" ni "GB".
+- Decí los precios como se hablan: "ciento cincuenta mil guaraníes".
+- No enumeres todo: mencioná una o dos opciones que más le sirvan y ofrecé contar el resto.
+- La aclaración de fecha y vigencia de los precios decila una sola vez en la conversación, de forma breve ("según lo publicado"); no la repitas en cada turno.
+- Teléfonos: da solo el que haga falta y escribilo en cifras separadas por espacios, por ejemplo "0 9 7 1, 1 0 0, 0 0 0"; el *111 escribilo así.
+- Hacé una sola pregunta por turno.`;
+
+// Whisper invents these captions when it receives silence or background noise.
+const TRANSCRIPT_NOISE = /subt[ií]tulos|amara\.org|gracias por ver|suscr[ií]b/i;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -211,7 +244,7 @@ async function handleChat(req, res) {
       return json(res, 400, { error: "Escribí un mensaje para comenzar." });
     }
 
-    const voiceMessages = [{ role: 'system', content: `${SYSTEM_PROMPT}\nEsta interacción es por voz: respondé en una o dos frases naturales, sin Markdown ni listas. Hacé una sola pregunta por turno. No repitas saludos. Conservá las condiciones importantes y ofrecé ampliar cuando haga falta.` }, ...messages];
+    const voiceMessages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n${VOICE_STYLE}` }, ...messages];
     const data = ROUTER_API_KEY ? await routerChat(voiceMessages) : await callNiro("/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -239,8 +272,8 @@ async function handleTranscription(req, res) {
       headers: { "Content-Type": contentType },
       body,
     });
-    if (!data?.text) throw new Error("Niro no devolvió una transcripción.");
-    json(res, 200, { text: data.text, seconds: data.seconds || null });
+    if (typeof data?.text !== "string") throw new Error("Niro no devolvió una transcripción.");
+    json(res, 200, { text: TRANSCRIPT_NOISE.test(data.text) ? "" : data.text, seconds: data.seconds || null });
   } catch (error) {
     const status = error.code === "missing_key" ? 503 : error.status && error.status < 500 ? error.status : 502;
     json(res, status, { error: error.message || "No se pudo transcribir el audio." });
