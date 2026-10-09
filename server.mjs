@@ -68,6 +68,12 @@ const ROUTER_API_BASE = (process.env.ROUTER_API_BASE || 'https://router.cnid.com
 const ROUTER_API_KEY = process.env.ROUTER_API_KEY || '';
 const ROUTER_CHAT_MODEL = process.env.ROUTER_CHAT_MODEL || 'cx/gpt-5.6-luna';
 const ROUTER_TTS_MODEL = process.env.ROUTER_TTS_MODEL || '';
+// With an OpenAI key the conversation runs on a live speech-to-speech model: the browser talks to
+// it directly over WebRTC and this server only hands out short-lived credentials and looks things
+// up for it. Without the key everything below falls back to transcribe, answer and voice in turns.
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1-mini';
+const REALTIME_VOICES = ['marin', 'cedar', 'coral', 'sage', 'shimmer', 'ballad', 'ash', 'verse', 'alloy', 'echo'];
 
 // Rewrites written shorthand into what a person would say aloud, so the voice does not spell symbols.
 function speechText(text) {
@@ -186,7 +192,11 @@ const GREETING = "Hola, {saludo}. Bienvenido al asistente virtual de Personal. �
 
 // The prompts are stored in the database (table "prompts") so they can be edited without a
 // release; these texts are only the first-time defaults and the fallback when it is unreachable.
+let realtimeKnowledge = '';
+try { realtimeKnowledge = readFileSync(path.join(ROOT, 'knowledge', 'realtime-prompt.md'), 'utf8'); } catch { realtimeKnowledge = knowledge; }
+
 const DEFAULT_PROMPTS = {
+  realtime: { content: realtimeKnowledge, description: "Instrucciones del modelo de voz en vivo (OpenAI Realtime)." },
   system: { content: knowledge, description: "Quién es el asistente, sus reglas y el resumen base de servicios." },
   rules: { content: RULES, description: "Límites de seguridad que se repiten en cada respuesta." },
   voice_style: { content: VOICE_STYLE, description: "Cómo debe hablar en la llamada de voz." },
@@ -308,6 +318,64 @@ function complete(messages) {
   });
 }
 
+function passagesText(found) {
+  return found.map((passage) => `(${passage.title}${passage.heading ? ` › ${passage.heading}` : ""})\n${(passage.whole ? passage.content : passage.content.slice(0, 1500))}`).join("\n\n");
+}
+
+// Sessions are paid per use, so one address cannot open them without limit.
+const sessionsByAddress = new Map();
+function allowSession(req) {
+  const address = req.headers["cf-connecting-ip"] || String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "";
+  const recent = (sessionsByAddress.get(address) || []).filter((time) => Date.now() - time < HOUR);
+  if (recent.length >= 40) return false;
+  sessionsByAddress.set(address, [...recent, Date.now()]);
+  if (sessionsByAddress.size > 5000) sessionsByAddress.delete(sessionsByAddress.keys().next().value);
+  return true;
+}
+
+// Creates a live voice session and returns its short-lived credential. The real key never
+// leaves the server; the browser uses the credential to connect straight to the model.
+async function handleRealtimeSession(req, res) {
+  if (!OPENAI_API_KEY) return json(res, 503, { error: "La voz en vivo no está configurada." });
+  if (!allowSession(req)) return json(res, 429, { error: "Demasiadas conversaciones seguidas. Probá de nuevo en un rato." });
+  const input = await readJson(req).catch(() => ({}));
+  const voice = REALTIME_VOICES.includes(input.voice) ? input.voice : REALTIME_VOICES[0];
+  const prices = db.overview();
+  const instructions = `${prompts.realtime}${prices ? `\n\n## Resumen de precios vigentes\n${prices}` : ""}`;
+  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST", signal: AbortSignal.timeout(15000),
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ session: {
+      type: "realtime", model: OPENAI_REALTIME_MODEL, instructions, output_modalities: ["audio"],
+      audio: {
+        input: { transcription: { model: "gpt-4o-mini-transcribe", language: "es" }, noise_reduction: { type: "near_field" },
+          turn_detection: { type: "semantic_vad", eagerness: "high", create_response: true, interrupt_response: true } },
+        output: { voice },
+      },
+      tools: [{ type: "function", name: "buscar_informacion",
+        description: "Busca en la información publicada por Personal (su web y su tienda online): productos, precios, cuotas con tarjeta, bancos, fichas técnicas, planes, packs, internet hogar, Flow, roaming, portabilidad, servicios, envíos, formas de pago y ayuda de soporte. Devuelve los textos más relacionados.",
+        parameters: { type: "object", properties: { consulta: { type: "string", description: "Lo que hay que buscar, con el nombre del producto o servicio del que se habla. Ejemplo: 'Samsung Galaxy A16 cuotas tarjeta Itaú'." } }, required: ["consulta"] } }],
+      tool_choice: "auto",
+    } }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.value) return json(res, 502, { error: data.error?.message || "No se pudo iniciar la voz en vivo." });
+  json(res, 200, { value: data.value, model: OPENAI_REALTIME_MODEL, voice });
+}
+
+// What the live model's lookup tool returns.
+async function handleSearch(req, res) {
+  const input = await readJson(req).catch(() => ({}));
+  const question = typeof input.question === "string" ? input.question.slice(0, 400) : "";
+  if (!question.trim()) return json(res, 400, { error: "Falta la consulta." });
+  const thread = typeof input.thread === "string" ? input.thread.slice(0, 2000) : question;
+  const found = await db.search(question, `${thread} ${question}`, `${thread} ${question}`);
+  // The live model already carries the full price list, and every character returned here is
+  // paid for and slows its answer, so only the closest passages go back, trimmed.
+  const closest = found.filter((passage) => !passage.whole).slice(0, 4).map((passage) => ({ ...passage, content: passage.content.slice(0, 1200) }));
+  json(res, 200, { text: closest.length ? passagesText(closest) : "No se encontró información publicada sobre eso." });
+}
+
 async function completeFresh(messages) {
   // The passages of personal.com.py closest to what was just asked travel with the question.
   // The system message must stay identical between calls: the provider takes about three
@@ -319,7 +387,7 @@ async function completeFresh(messages) {
   const found = await db.search(messages.at(-1)?.content || "", thread, earlier);
   const last = messages.at(-1);
   const grounded = found.length && last?.role === "user"
-    ? [...messages.slice(0, -1), { role: "user", content: `[Información publicada por Personal en su web y su tienda, buscada para esta consulta. Usá solo lo que sirva; si no alcanza para responder, decilo.]\n${found.map((passage) => `(${passage.title}${passage.heading ? ` › ${passage.heading}` : ""})\n${(passage.whole ? passage.content : passage.content.slice(0, 1500))}`).join("\n\n")}\n\n[Lo que dijo el cliente]\n${last.content}` }]
+    ? [...messages.slice(0, -1), { role: "user", content: `[Información publicada por Personal en su web y su tienda, buscada para esta consulta. Usá solo lo que sirva; si no alcanza para responder, decilo.]\n${passagesText(found)}\n\n[Lo que dijo el cliente]\n${last.content}` }]
     : messages;
   const voiceMessages = [{ role: 'system', content: `${prompts.system}\n\n${prompts.rules}\n\n${prompts.voice_style}` }, ...grounded];
   const data = ROUTER_API_KEY ? await routerChat(voiceMessages) : await callNiro("/chat/completions", {
@@ -471,7 +539,9 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': audio.length, 'Cache-Control': 'no-store' });
       return res.end(audio);
     }
-    if (req.method === "GET" && url.pathname === "/api/config") return json(res, 200, { greeting: prompts.greeting });
+    if (req.method === "GET" && url.pathname === "/api/config") return json(res, 200, { greeting: prompts.greeting, realtime: Boolean(OPENAI_API_KEY), realtimeVoices: REALTIME_VOICES });
+    if (req.method === "POST" && url.pathname === "/api/realtime/session") return await handleRealtimeSession(req, res);
+    if (req.method === "POST" && url.pathname === "/api/search") return await handleSearch(req, res);
     if (req.method === "GET" && url.pathname === "/api/health") {
       return json(res, 200, { ok: true, niroConfigured: Boolean(NIRO_API_KEY), apiBase: NIRO_API_BASE, chatProvider: ROUTER_API_KEY ? 'router' : 'niro', chatModel: ROUTER_API_KEY ? ROUTER_CHAT_MODEL : 'auto', voiceProvider: ROUTER_API_KEY && ROUTER_TTS_MODEL ? 'router' : process.env.OPENAI_API_KEY ? 'openai' : 'windows', voiceModel: ROUTER_TTS_MODEL || null, database: await db.status().catch(() => ({ connected: false })) });
     }

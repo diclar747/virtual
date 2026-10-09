@@ -11,8 +11,11 @@ try {
   const savedVoice = localStorage.getItem('voice');
   if (savedVoice && [...voiceSelect.options].some(option => option.value === savedVoice)) voiceSelect.value = savedVoice;
 } catch { /* keep the default */ }
-voiceSelect.addEventListener('change', () => { try { localStorage.setItem('voice', voiceSelect.value); } catch { /* not remembered */ } });
-voiceSelect.addEventListener('change', () => fetch(greetingUrl()).catch(() => {}));
+voiceSelect.addEventListener('change', () => {
+  try { localStorage.setItem(liveVoice ? 'liveVoice' : 'voice', voiceSelect.value); } catch { /* not remembered */ }
+  // A live conversation keeps its voice until it reconnects, so changing it reconnects at once.
+  if (liveVoice) { if (call) { stop(); start(); } } else fetch(greetingUrl()).catch(() => {});
+});
 let active = false;
 let session = 0;
 let turn = 0;
@@ -82,7 +85,7 @@ function liveText() {
 }
 
 // It listens only while the assistant is silent, so it never transcribes the assistant's own voice.
-setInterval(() => { if (active && !speaking && (!pending || settling)) liveStart(); else liveStop(); }, 200);
+setInterval(() => { if (active && !call && !speaking && (!pending || settling)) liveStart(); else liveStop(); }, 200);
 
 function show(mode, text, detail = '') {
   orb.dataset.state = mode;
@@ -165,6 +168,7 @@ function cancelResponse() {
 
 function stop() {
   active = false;
+  endCall();
   settling = false; liveStop();
   ++session;
   cancelResponse();
@@ -342,10 +346,131 @@ async function answer(recording, currentTurn, useLive = false) {
   }
 }
 
+
+// ───────── Live voice (speech-to-speech) ─────────
+// When the server has a live voice model, the browser connects to it directly over WebRTC: the
+// model hears the microphone, answers with its own voice and stops when interrupted, with no
+// transcription or separate voice step in between. The turn-by-turn code above stays as the
+// fallback for when live voice is not configured or fails to connect.
+const LIVE_VOICES = { marin: 'Marin · mujer', cedar: 'Cedar · hombre', coral: 'Coral · mujer', sage: 'Sage · mujer', shimmer: 'Shimmer · mujer', ballad: 'Ballad · hombre', ash: 'Ash · hombre', verse: 'Verse · hombre', alloy: 'Alloy · neutra', echo: 'Echo · hombre' };
+let liveVoice = false;       // the server offers live voice
+let call = null;             // the open live connection, if any
+
+function useLiveVoices(voices) {
+  liveVoice = true;
+  voiceSelect.innerHTML = '';
+  for (const voice of voices) voiceSelect.add(new Option(LIVE_VOICES[voice] || voice, voice));
+  try { const saved = localStorage.getItem('liveVoice'); if (saved && voices.includes(saved)) voiceSelect.value = saved; } catch { /* default voice */ }
+}
+
+function endCall() {
+  const open = call;
+  call = null;
+  if (!open) return;
+  clearTimeout(open.idle); cancelAnimationFrame(open.frame);
+  try { open.channel.close(); } catch { /* already closed */ }
+  open.capture.getTracks().forEach(track => track.stop());
+  open.meter?.close().catch(() => {});
+  open.connection.close();
+  open.player.srcObject = null;
+}
+
+// Returns true when the live conversation is up; false tells the caller to use the fallback.
+async function startCall(currentSession) {
+  const stillWanted = () => active && currentSession === session;
+  let capture;
+  try {
+    capture = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+  } catch (error) {
+    if (stillWanted()) { stop(); show('idle', error.name === 'NotAllowedError' ? 'Permití el micrófono para conversar' : 'No pude abrir el micrófono', 'Después tocá el círculo'); }
+    return true;
+  }
+  if (!stillWanted()) { capture.getTracks().forEach(track => track.stop()); return true; }
+  const connection = new RTCPeerConnection();
+  const player = new Audio();
+  player.autoplay = true;
+  const channel = connection.createDataChannel('oai-events');
+  const open = call = { connection, channel, capture, player, idle: 0, frame: 0, meter: null, greeted: false };
+  const send = event => { if (channel.readyState === 'open') channel.send(JSON.stringify(event)); };
+  // A forgotten open tab must not keep a paid session running.
+  const touch = () => { clearTimeout(open.idle); open.idle = setTimeout(() => { if (call === open) { stop(); show('idle', 'Tocá para conversar', 'Pausé la conversación por inactividad'); } }, 180000); };
+  try {
+    connection.ontrack = event => {
+      player.srcObject = event.streams[0];
+      player.play().catch(error => { if (error.name === 'NotAllowedError' && call === open) { stop(); show('idle', 'Tocá para conversar'); } });
+    };
+    capture.getTracks().forEach(track => connection.addTrack(track, capture));
+    const [credential] = await Promise.all([
+      fetch('/api/realtime/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ voice: voiceSelect.value }) }).then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error || 'sin sesión'); return data; }),
+      connection.createOffer().then(offer => connection.setLocalDescription(offer)),
+    ]);
+    const answer = await fetch('https://api.openai.com/v1/realtime/calls', { method: 'POST', body: connection.localDescription.sdp, headers: { Authorization: `Bearer ${credential.value}`, 'Content-Type': 'application/sdp' } });
+    if (!answer.ok) throw new Error(`El modelo de voz respondió ${answer.status}`);
+    await connection.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
+    if (call !== open || !stillWanted()) { if (call === open) endCall(); return true; }
+  } catch {
+    if (call === open) endCall();
+    return false;
+  }
+
+  channel.onopen = () => {
+    // Coming back to the app continues the same talk: what was said before is handed to the new session.
+    for (const message of history.slice(-10)) send({ type: 'conversation.item.create', item: { type: 'message', role: message.role, content: [{ type: message.role === 'user' ? 'input_text' : 'output_text', text: message.content }] } });
+    if (!history.length) send({ type: 'response.create', response: { instructions: `Saludá diciendo exactamente esto, con calidez, y nada más: "${greetingText()}"` } });
+    show('listening', 'Te escucho');
+    touch();
+  };
+  channel.onmessage = async message => {
+    if (call !== open) return;
+    const event = JSON.parse(message.data);
+    if (event.type === 'input_audio_buffer.speech_started') { touch(); show('listening', 'Te escucho'); }
+    else if (event.type === 'input_audio_buffer.speech_stopped') show('thinking', 'Un momento');
+    else if (event.type === 'output_audio_buffer.started') { touch(); show('speaking', 'Podés interrumpirme hablando'); }
+    else if (event.type === 'output_audio_buffer.stopped' || event.type === 'output_audio_buffer.cleared') show('listening', 'Te escucho');
+    else if (event.type === 'conversation.item.input_audio_transcription.completed' && event.transcript?.trim()) history.push({ role: 'user', content: event.transcript.trim() });
+    else if (event.type === 'response.output_audio_transcript.done' && event.transcript?.trim()) history.push({ role: 'assistant', content: event.transcript.trim() });
+    else if (event.type === 'response.done') {
+      // The model asked to look something up: fetch it from our database and let it answer.
+      const lookups = (event.response?.output || []).filter(item => item.type === 'function_call' && item.name === 'buscar_informacion');
+      if (!lookups.length) return;
+      for (const lookup of lookups) {
+        let text = 'No se pudo consultar la información en este momento.';
+        try {
+          const question = JSON.parse(lookup.arguments || '{}').consulta || '';
+          const response = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, thread: history.slice(-4).map(entry => entry.content).join(' ') }) });
+          const data = await response.json();
+          if (response.ok && data.text) text = data.text;
+        } catch { /* the model is told the lookup failed */ }
+        send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: lookup.call_id, output: text } });
+      }
+      send({ type: 'response.create' });
+    }
+  };
+  connection.onconnectionstatechange = () => {
+    if (call === open && ['failed', 'closed', 'disconnected'].includes(connection.connectionState)) { stop(); show('idle', 'Tocá para conversar', 'Se cortó la conexión'); }
+  };
+  // The ring moves with the person's voice.
+  try {
+    open.meter = new AudioContext();
+    const analyser = open.meter.createAnalyser(); analyser.fftSize = 1024;
+    open.meter.createMediaStreamSource(capture).connect(analyser);
+    const levels = new Float32Array(analyser.fftSize);
+    const draw = () => {
+      if (call !== open) return;
+      analyser.getFloatTimeDomainData(levels);
+      orb.style.setProperty('--voice-energy', Math.min(Math.sqrt(levels.reduce((total, value) => total + value * value, 0) / levels.length) * 6, .15));
+      open.frame = requestAnimationFrame(draw);
+    };
+    draw();
+  } catch { /* the conversation works without the animation */ }
+  show('listening', 'Conectando');
+  return true;
+}
+
 // The greeting is one of the prompts kept in the database; this text is only the fallback.
 let greetingTemplate = 'Hola, {saludo}. Bienvenido al asistente virtual de Personal. ¿En qué le puedo ayudar?';
 const greetingLoaded = fetch('/api/config').then(response => response.json())
-  .then(config => { if (config.greeting) greetingTemplate = config.greeting; }).catch(() => {});
+  .then(config => { if (config.greeting) greetingTemplate = config.greeting; if (config.realtime && window.RTCPeerConnection) useLiveVoices(config.realtimeVoices); }).catch(() => {});
 
 function greetingText() {
   const hour = new Date().getHours();
@@ -397,6 +522,8 @@ async function start() {
   if (active) return;
   active = true; const currentSession = ++session;
   show('listening', 'Activando el micrófono');
+  if (liveVoice && await startCall(currentSession)) return;
+  if (!active || currentSession !== session) return;
   fetch('/api/warm', { method: 'POST' }).catch(() => {});
   try {
     // A valid silent WAV unlocks this audio element from the user's gesture.
@@ -436,7 +563,7 @@ greetingLoaded.then(() => { if (!document.hidden) start(); });
 
 // Installable app: the service worker keeps the page, fonts and greeting on the device.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').then(() => greetingLoaded).then(() => fetch(greetingUrl())).catch(() => {});
+  navigator.serviceWorker.register('/sw.js').then(() => greetingLoaded).then(() => { if (!liveVoice) fetch(greetingUrl()); }).catch(() => {});
 }
 const installButton = document.querySelector('#installButton');
 let installPrompt;

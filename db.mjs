@@ -154,6 +154,14 @@ const PHONE_TALK = /celu|tel[eé]fono|smartphone|equipo|samsung|galaxy|motorola|
 // question with the turn before it, so "¿y en cuotas?" still finds the product being discussed;
 // and a longer stretch of the talk, so that product is not lost after a few side questions. While the talk is about phones the full price list rides along, which is what lets
 // the assistant recommend by budget or name the cheapest one.
+// The price lists of the store and the home fibre plans, as one text. The live voice model keeps
+// it in its instructions so the most common questions need no lookup at all.
+export function overview() {
+  if (!ready || !index) return '';
+  const wanted = index.passages.filter((passage) => /#telefonos-por-precio$|#lista-/.test(passage.url) || (/\/hogar\/internet\.html$/.test(passage.url) && /velocidad:/.test(passage.content)));
+  return [...new Map(wanted.map((passage) => [passage.content, passage])).values()].map((passage) => passage.content).join('\n\n');
+}
+
 export async function search(question, thread = question, earlier = thread) {
   if (!ready) return [];
   const results = [...searchIndex(index, question, 4)];

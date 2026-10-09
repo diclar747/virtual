@@ -1,5 +1,5 @@
 // Bump BUILD together with the ?v= of the page assets so every release replaces the cached shell.
-const BUILD = '20261009-14';
+const BUILD = '20261009-17';
 const SHELL = `shell-${BUILD}`;
 const VOICE = 'voice-v1';
 const FONTS = 'fonts-v1';
