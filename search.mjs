@@ -4,10 +4,11 @@ const STOPWORDS = new Set('a al algo algun alguna como con cual cuales cuando cu
 
 // People do not speak with the words the site uses, so each spoken word also searches its equivalents.
 const EQUIVALENTS = {
-  casa: 'hogar', domicilio: 'hogar', wifi: 'internet fibra', celular: 'equipo', telefono: 'equipo', tele: 'flow tv', television: 'flow tv', cable: 'flow tv',
+  casa: 'hogar', domicilio: 'hogar', wifi: 'internet fibra', celular: 'equipo telefono', telefono: 'equipo celular', tele: 'flow tv', television: 'flow tv', cable: 'flow tv',
   canal: 'grilla', deporte: 'deportivo futbol', robaron: 'robo denuncia', robo: 'denuncia', perdi: 'extravio denuncia', chip: 'sim', viaje: 'roaming', viajar: 'roaming', viajo: 'roaming', exterior: 'roaming',
+  celu: 'celular equipo', auricular: 'audifono earbuds freepods', audifono: 'auricular earbuds', televisor: 'tv smart', parlante: 'bluetooth altavoz', cargador: 'carga', barato: 'economico menor', economico: 'barato menor', caro: 'premium', cuota: 'tarjeta', tarjeta: 'cuota credito', envio: 'entrega domicilio', envian: 'envio entrega', mandan: 'envio entrega', comprar: 'tienda',
   cambiarme: 'portabilidad', pasarme: 'portabilidad', portar: 'portabilidad', pagar: 'pago', recargar: 'recarga', cargar: 'recarga', billetera: 'pay', empresa: 'negocio', negocio: 'empresa',
-  mil: '1000 1gbps giga', giga: 'gb', lento: 'velocidad', lenta: 'velocidad', corta: 'inconveniente', cobertura: 'zona',
+  mil: '1000 1gbps giga', gb: 'giga', mb: 'mega', mbps: 'mega', lento: 'velocidad', lenta: 'velocidad', corta: 'inconveniente', cobertura: 'zona',
   uno: '1', dos: '2', tres: '3', cuatro: '4', cinco: '5', seis: '6', siete: '7', ocho: '8', diez: '10', quince: '15', treinta: '30',
 };
 
@@ -17,8 +18,18 @@ function stem(word) {
   if (word.length > 3 && word.endsWith('s')) return word.slice(0, -1);
   return word;
 }
+// Model names such as "S26" or "A16" also count by their number alone, because speech
+// recognition often writes them apart ("S 26", "A 16").
 function tokens(text) {
-  return (text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').match(/[a-z0-9ñ]+/g) || []).filter((word) => word.length > 1 || /\d/.test(word)).map(stem);
+  const words = (text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9ñ]+/g) || []).filter((word) => word.length > 1 || /\d/.test(word));
+  return words.flatMap((word) => {
+    const model = word.match(/^[a-z]{1,2}(\d{1,3})$/);
+    if (model) return [word, model[1]];
+    // "128GB" in the catalogue must meet "128 gigas" as people say it.
+    const size = word.match(/^(\d+)(gb|tb|mb|mbps|gbps)$/);
+    if (size) return [size[1], size[2] === 'gb' ? 'giga' : size[2] === 'mb' || size[2] === 'mbps' ? 'mega' : size[2]];
+    return [stem(word)];
+  });
 }
 
 function bm25Field(documents) {

@@ -3,6 +3,7 @@
 // server keeps working from the files in ./knowledge and simply has no site search.
 import pg from 'pg';
 import { crawl } from './scripts/crawl.mjs';
+import { store } from './scripts/store.mjs';
 import { buildIndex, searchIndex } from './search.mjs';
 
 const DATABASE_URL = process.env.DATABASE_URL || '';
@@ -38,6 +39,17 @@ create table if not exists passages (
   ) stored
 );
 create index if not exists passages_search on passages using gin (search);
+create table if not exists products (
+  url text primary key,
+  name text not null,
+  brand text not null default '',
+  category text not null default '',
+  price numeric,
+  list_price numeric,
+  available boolean not null default false,
+  details jsonb not null default '{}',
+  updated_at timestamptz not null default now()
+);
 create table if not exists sync_runs (
   id bigserial primary key,
   finished_at timestamptz not null default now(),
@@ -77,7 +89,7 @@ export async function loadPrompts() {
 
 export async function status() {
   if (!ready) return { connected: false };
-  const { rows: [counts] } = await pool.query('select (select count(*)::int from pages) as pages, (select count(*)::int from passages) as passages, (select max(finished_at) from sync_runs) as synced_at');
+  const { rows: [counts] } = await pool.query('select (select count(*)::int from pages) as pages, (select count(*)::int from products) as products, (select count(*)::int from passages) as passages, (select max(finished_at) from sync_runs) as synced_at');
   return { connected: true, ...counts };
 }
 
@@ -87,8 +99,24 @@ async function loadIndex() {
   index = buildIndex(rows);
 }
 
-export async function search(question, limit = 6) {
-  return ready ? searchIndex(index, question, limit) : [];
+const PHONE_TALK = /celu|tel[eé]fono|smartphone|equipo|samsung|galaxy|motorola|moto |xiaomi|redmi|honor|iphone/i;
+
+// Three searches are merged: the new question on its own, so a change of subject is found; the
+// question with the turn before it, so "¿y en cuotas?" still finds the product being discussed;
+// and a longer stretch of the talk, so that product is not lost after a few side questions. While the talk is about phones the full price list rides along, which is what lets
+// the assistant recommend by budget or name the cheapest one.
+export async function search(question, thread = question, earlier = thread) {
+  if (!ready) return [];
+  const results = [...searchIndex(index, question, 4)];
+  const add = (found, room) => { for (const passage of found) if (results.length < room && !results.some((known) => known.url === passage.url && known.content === passage.content)) results.push(passage); };
+  add(searchIndex(index, thread, 4), 7);
+  add(searchIndex(index, earlier, 3), 8);
+  if (PHONE_TALK.test(thread)) {
+    const list = index.passages.find((passage) => passage.url.endsWith('#telefonos-por-precio'));
+    if (list && !results.some((known) => known.url === list.url)) results.unshift({ ...list, whole: true });
+    else results.forEach((known) => { if (known.url === list?.url) known.whole = true; });
+  }
+  return results;
 }
 
 // Reads the whole site again and replaces the stored copy in one transaction.
@@ -97,15 +125,22 @@ export async function sync(log = () => {}) {
   syncing = true;
   const client = await pool.connect();
   try {
-    const pages = await crawl(log);
-    if (pages.length < 10) throw new Error(`El sitio devolvió solo ${pages.length} páginas; se conserva la copia anterior.`);
+    const site = await crawl(log);
+    if (site.length < 10) throw new Error(`El sitio devolvió solo ${site.length} páginas; se conserva la copia anterior.`);
+    const shop = await store(log);
+    const pages = [...site, ...shop];
     await client.query('begin');
     await client.query('delete from pages');
+    await client.query('delete from products');
     let passages = 0;
     for (const page of pages) {
       // The topic is what the page is about: its title, description, address and section headings.
-      const topic = [page.title.replace(/\|.*$/, ''), page.description, new URL(page.url).pathname.replace(/\.html?$/, '').replace(/[^a-z0-9]+/gi, ' '), ...page.lines.filter((line) => line.startsWith('## ') && !line.startsWith('## Planes, packs y precios')).map((line) => line.slice(3))].join(' ');
+      const topic = page.topic || [page.title.replace(/\|.*$/, ''), page.description, new URL(page.url).pathname.replace(/\.html?$/, '').replace(/[^a-z0-9]+/gi, ' '), ...page.lines.filter((line) => line.startsWith('## ') && !line.startsWith('## Planes, packs y precios')).map((line) => line.slice(3))].join(' ');
       await client.query('insert into pages (url, title, description, content, topic) values ($1, $2, $3, $4, $5)', [page.url, page.title, page.description, page.content, topic]);
+      if (page.product) {
+        await client.query('insert into products (url, name, brand, category, price, list_price, available, details) values ($1, $2, $3, $4, $5, $6, $7, $8)',
+          [page.url, page.product.name, page.product.brand, page.product.category, page.product.price, page.product.listPrice, page.product.available, JSON.stringify(page.product.details)]);
+      }
       for (const passage of page.chunks) {
         await client.query('insert into passages (url, title, heading, content) values ($1, $2, $3, $4)', [page.url, page.title, passage.heading, passage.content]);
         passages += 1;

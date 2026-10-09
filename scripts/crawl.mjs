@@ -42,7 +42,7 @@ function extract(html) {
 }
 
 const HEADERS = { 'User-Agent': 'Mozilla/5.0 (asistente-demo)' };
-const IGNORED_KEYS = /^(wowDelay|ctaHref|ctaText|href|link|url|img|image|icon|class|id|dataType|color|target|classes|category|type|expanded|delay|labelledby|controls|parent)$|Class\d*$|DataTitle$|Id$|^collapse/i;
+const IGNORED_KEYS = /^(wowDelay|ctaHref|ctaText|href|link|url|img|image|icon|class|id|dataType|color|target|classes|category|type|expanded|delay|labelledby|controls|parent)$|Class\d*$|DataTitle$|Id$|^collapse|^aria|^clase|^comentario$/i;
 
 // Plans, packs and prices are not in the HTML: small loader scripts fill them from JSON files.
 // This finds the files a page uses and turns them into readable lines.
@@ -79,7 +79,7 @@ function flatten(value, lines, label = '') {
 }
 
 export async function crawl(log = () => {}) {
-  const queue = [`${ORIGIN}/`];
+  const queue = [`${ORIGIN}/`, `${ORIGIN}/tienda/bancos/`];
   const seen = new Set(queue);
   const pages = [];
   try {
