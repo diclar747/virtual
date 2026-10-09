@@ -72,7 +72,8 @@ const ROUTER_TTS_MODEL = process.env.ROUTER_TTS_MODEL || '';
 // it directly over WebRTC and this server only hands out short-lived credentials and looks things
 // up for it. Without the key everything below falls back to transcribe, answer and voice in turns.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1-mini';
+// The mini model misread about a quarter of the prices aloud; the full one got them right.
+const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1';
 const REALTIME_VOICES = ['marin', 'cedar', 'coral', 'sage', 'shimmer', 'ballad', 'ash', 'verse', 'alloy', 'echo'];
 
 // Rewrites written shorthand into what a person would say aloud, so the voice does not spell symbols.
@@ -188,7 +189,7 @@ Persona: "¿Cuánto sale el Samsung A dieciséis?" Vos: "El Galaxy A dieciséis 
 Persona: "¿Y en cuotas?" Vos: "Con tarjeta de crédito lo podés llevar hasta en veinticuatro cuotas de treinta y seis mil seiscientos guaraníes. ¿Con qué banco es tu tarjeta?"
 Persona: "No me anda internet en casa." Vos: "Uy, qué macana. ¿Te pasa en todos los aparatos o solamente en uno?"`;
 
-const GREETING = "Hola, {saludo}. Bienvenido al asistente virtual de Personal. ¿En qué le puedo ayudar?";
+const GREETING = "Hola, {saludo}. Bienvenido, soy {articulo} asistente virtual de Personal. ¿En qué puedo ayudarte?";
 
 // The prompts are stored in the database (table "prompts") so they can be edited without a
 // release; these texts are only the first-time defaults and the fallback when it is unreachable.
@@ -318,6 +319,32 @@ function complete(messages) {
   });
 }
 
+// Spanish words for a whole number: 1598697 → "un millón quinientos noventa y ocho mil seiscientos noventa y siete".
+const SMALL = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte', 'veintiuno', 'veintidós', 'veintitrés', 'veinticuatro', 'veinticinco', 'veintiséis', 'veintisiete', 'veintiocho', 'veintinueve'];
+const TENS = ['', '', '', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+const HUNDREDS = ['', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+function below1000(number) {
+  if (number === 100) return 'cien';
+  const rest = number % 100;
+  const low = rest < 30 ? (rest ? SMALL[rest] : '') : `${TENS[Math.floor(rest / 10)]}${rest % 10 ? ` y ${SMALL[rest % 10]}` : ''}`;
+  return [HUNDREDS[Math.floor(number / 100)], low].filter(Boolean).join(' ');
+}
+// "uno" is cut short before "mil" and "millones": veintiún mil, un millón.
+const before = (words) => words.replace(/veintiuno$/, 'veintiún').replace(/uno$/, 'un');
+function numberWords(number) {
+  if (number < 1000) return below1000(number) || 'cero';
+  const millions = Math.floor(number / 1e6), thousands = Math.floor((number % 1e6) / 1000), units = number % 1000;
+  return [millions ? (millions === 1 ? 'un millón' : `${before(numberWords(millions))} millones`) : '', thousands ? (thousands === 1 ? 'mil' : `${before(below1000(thousands))} mil`) : '', units ? below1000(units) : ''].filter(Boolean).join(' ');
+}
+
+// The live voice model garbles long figures written in digits (it said "993.000" for 293.000 and
+// swapped digits in others), so every amount is handed to it already written out in words.
+function amountsInWords(text) {
+  return text
+    .replace(/Gs\.?\s*(\d{1,3}(?:\.\d{3})+|\d+)/g, (_, digits) => `${numberWords(Number(digits.replace(/\./g, '')))} guaraníes`)
+    .replace(/\b\d{1,3}(?:\.\d{3})+\b/g, (digits) => `${numberWords(Number(digits.replace(/\./g, '')))} guaraníes`);
+}
+
 function passagesText(found) {
   return found.map((passage) => `(${passage.title}${passage.heading ? ` › ${passage.heading}` : ""})\n${(passage.whole ? passage.content : passage.content.slice(0, 1500))}`).join("\n\n");
 }
@@ -341,7 +368,7 @@ async function handleRealtimeSession(req, res) {
   const input = await readJson(req).catch(() => ({}));
   const voice = REALTIME_VOICES.includes(input.voice) ? input.voice : REALTIME_VOICES[0];
   const prices = db.overview();
-  const instructions = `${prompts.realtime}${prices ? `\n\n## Resumen de precios vigentes\n${prices}` : ""}`;
+  const instructions = `${prompts.realtime}${prices ? `\n\n## Resumen de precios vigentes\n${amountsInWords(prices)}` : ""}`;
   const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
     method: "POST", signal: AbortSignal.timeout(15000),
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
@@ -373,7 +400,7 @@ async function handleSearch(req, res) {
   // The live model already carries the full price list, and every character returned here is
   // paid for and slows its answer, so only the closest passages go back, trimmed.
   const closest = found.filter((passage) => !passage.whole).slice(0, 4).map((passage) => ({ ...passage, content: passage.content.slice(0, 1200) }));
-  json(res, 200, { text: closest.length ? passagesText(closest) : "No se encontró información publicada sobre eso." });
+  json(res, 200, { text: closest.length ? amountsInWords(passagesText(closest)) : "No se encontró información publicada sobre eso." });
 }
 
 async function completeFresh(messages) {

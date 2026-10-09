@@ -158,7 +158,9 @@ const PHONE_TALK = /celu|tel[eé]fono|smartphone|equipo|samsung|galaxy|motorola|
 // it in its instructions so the most common questions need no lookup at all.
 export function overview() {
   if (!ready || !index) return '';
-  const wanted = index.passages.filter((passage) => /#telefonos-por-precio$|#lista-/.test(passage.url) || (/\/hogar\/internet\.html$/.test(passage.url) && /velocidad:/.test(passage.content)));
+  // The per-brand phone lists repeat the cheapest-first list, and a price that appears twice is
+  // one more chance for the model to mix rows up, so those are left out.
+  const wanted = index.passages.filter((passage) => /#telefonos-por-precio$/.test(passage.url) || (/#lista-/.test(passage.url) && !/#lista-equipos-/.test(passage.url)) || (/\/hogar\/internet\.html$/.test(passage.url) && /velocidad:/.test(passage.content)));
   return [...new Map(wanted.map((passage) => [passage.content, passage])).values()].map((passage) => passage.content).join('\n\n');
 }
 

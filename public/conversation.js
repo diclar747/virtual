@@ -359,7 +359,7 @@ let call = null;             // the open live connection, if any
 function useLiveVoices(voices) {
   liveVoice = true;
   voiceSelect.innerHTML = '';
-  for (const voice of voices) voiceSelect.add(new Option(LIVE_VOICES[voice] || voice, voice));
+  for (const voice of voices) { const option = new Option(LIVE_VOICES[voice] || voice, voice); option.dataset.article = /hombre/.test(option.text) ? 'el' : 'la'; voiceSelect.add(option); }
   try { const saved = localStorage.getItem('liveVoice'); if (saved && voices.includes(saved)) voiceSelect.value = saved; } catch { /* default voice */ }
 }
 
@@ -399,7 +399,12 @@ async function startCall(currentSession) {
       player.srcObject = event.streams[0];
       player.play().catch(error => { if (error.name === 'NotAllowedError' && call === open) { stop(); show('idle', 'Tocá para conversar'); } });
     };
-    capture.getTracks().forEach(track => connection.addTrack(track, capture));
+    // The microphone stays closed until the welcome has been said: otherwise the model hears its
+    // own voice or the room through the speakers, takes it for an interruption and never greets.
+    const greeting = !history.length;
+    capture.getTracks().forEach(track => { track.enabled = !greeting; connection.addTrack(track, capture); });
+    open.listen = () => capture.getTracks().forEach(track => { track.enabled = true; });
+    if (greeting) setTimeout(() => open.listen(), 12000);
     const [credential] = await Promise.all([
       fetch('/api/realtime/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ voice: voiceSelect.value }) }).then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error || 'sin sesión'); return data; }),
       connection.createOffer().then(offer => connection.setLocalDescription(offer)),
@@ -417,7 +422,7 @@ async function startCall(currentSession) {
     // Coming back to the app continues the same talk: what was said before is handed to the new session.
     for (const message of history.slice(-10)) send({ type: 'conversation.item.create', item: { type: 'message', role: message.role, content: [{ type: message.role === 'user' ? 'input_text' : 'output_text', text: message.content }] } });
     if (!history.length) send({ type: 'response.create', response: { instructions: `Saludá diciendo exactamente esto, con calidez, y nada más: "${greetingText()}"` } });
-    show('listening', 'Te escucho');
+    show(history.length ? 'listening' : 'thinking', history.length ? 'Te escucho' : 'Un momento');
     touch();
   };
   channel.onmessage = async message => {
@@ -426,7 +431,7 @@ async function startCall(currentSession) {
     if (event.type === 'input_audio_buffer.speech_started') { touch(); show('listening', 'Te escucho'); }
     else if (event.type === 'input_audio_buffer.speech_stopped') show('thinking', 'Un momento');
     else if (event.type === 'output_audio_buffer.started') { touch(); show('speaking', 'Podés interrumpirme hablando'); }
-    else if (event.type === 'output_audio_buffer.stopped' || event.type === 'output_audio_buffer.cleared') show('listening', 'Te escucho');
+    else if (event.type === 'output_audio_buffer.stopped' || event.type === 'output_audio_buffer.cleared') { open.listen(); show('listening', 'Te escucho'); }
     else if (event.type === 'conversation.item.input_audio_transcription.completed' && event.transcript?.trim()) history.push({ role: 'user', content: event.transcript.trim() });
     else if (event.type === 'response.output_audio_transcript.done' && event.transcript?.trim()) history.push({ role: 'assistant', content: event.transcript.trim() });
     else if (event.type === 'response.done') {
@@ -468,7 +473,7 @@ async function startCall(currentSession) {
 }
 
 // The greeting is one of the prompts kept in the database; this text is only the fallback.
-let greetingTemplate = 'Hola, {saludo}. Bienvenido al asistente virtual de Personal. ¿En qué le puedo ayudar?';
+let greetingTemplate = 'Hola, {saludo}. Bienvenido, soy {articulo} asistente virtual de Personal. ¿En qué puedo ayudarte?';
 const greetingLoaded = fetch('/api/config').then(response => response.json())
   .then(config => { if (config.greeting) greetingTemplate = config.greeting; if (config.realtime && window.RTCPeerConnection) useLiveVoices(config.realtimeVoices); }).catch(() => {});
 
