@@ -3,12 +3,14 @@
 // server keeps working from the files in ./knowledge and simply has no site search.
 import pg from 'pg';
 import { crawl } from './scripts/crawl.mjs';
+import { buildIndex, searchIndex } from './search.mjs';
 
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const DAY = 24 * 60 * 60 * 1000;
 let pool = null;
 let ready = false;
 let syncing = false;
+let index = null;
 
 const SCHEMA = `
 create table if not exists prompts (
@@ -24,6 +26,7 @@ create table if not exists pages (
   content text not null,
   fetched_at timestamptz not null default now()
 );
+alter table pages add column if not exists topic text not null default '';
 create table if not exists passages (
   id bigserial primary key,
   url text not null references pages(url) on delete cascade,
@@ -56,6 +59,7 @@ export async function connect(defaults) {
     for (const [key, { content, description }] of Object.entries(defaults)) {
       await pool.query('insert into prompts (key, content, description) values ($1, $2, $3) on conflict (key) do nothing', [key, content, description]);
     }
+    await loadIndex();
     ready = true;
   } catch { ready = false; }
   return ready;
@@ -77,21 +81,14 @@ export async function status() {
   return { connected: true, ...counts };
 }
 
-const STOPWORDS = new Set('a al algo algun alguna como con cual cuales cuando cuanto cuanta cuantos de del donde el ella en es esa ese eso esta este esto hay la las le lo los me mi mis muy necesito no o para pero por que quiero quisiera saber se si sin sobre su sus te tengo tiene tienen tu un una uno unos y ya yo hola buenas buenos dias tardes gracias favor puedo podes pueden sale salen cuesta cuestan'.split(' '));
+// The passages are few, so they are kept in memory and ranked there (see search.mjs).
+async function loadIndex() {
+  const { rows } = await pool.query('select p.url, p.title, p.heading, p.content, g.topic from passages p join pages g using (url) order by p.id');
+  index = buildIndex(rows);
+}
 
-// Full-text search over the site. Words are OR-ed so a spoken, imprecise question still matches.
 export async function search(question, limit = 6) {
-  if (!ready) return [];
-  const words = [...new Set(question.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').match(/[a-z0-9ñ]{2,}/g) || [])].filter((word) => !STOPWORDS.has(word)).slice(0, 12);
-  if (!words.length) return [];
-  try {
-    const { rows } = await pool.query(
-      `select url, title, heading, content, ts_rank_cd(search, query, 32) as rank
-       from passages, to_tsquery('spanish', $1) query
-       where search @@ query order by rank desc limit $2`,
-      [words.join(' | '), limit]);
-    return rows;
-  } catch { return []; }
+  return ready ? searchIndex(index, question, limit) : [];
 }
 
 // Reads the whole site again and replaces the stored copy in one transaction.
@@ -106,7 +103,9 @@ export async function sync(log = () => {}) {
     await client.query('delete from pages');
     let passages = 0;
     for (const page of pages) {
-      await client.query('insert into pages (url, title, description, content) values ($1, $2, $3, $4)', [page.url, page.title, page.description, page.content]);
+      // The topic is what the page is about: its title, description, address and section headings.
+      const topic = [page.title.replace(/\|.*$/, ''), page.description, new URL(page.url).pathname.replace(/\.html?$/, '').replace(/[^a-z0-9]+/gi, ' '), ...page.lines.filter((line) => line.startsWith('## ') && !line.startsWith('## Planes, packs y precios')).map((line) => line.slice(3))].join(' ');
+      await client.query('insert into pages (url, title, description, content, topic) values ($1, $2, $3, $4, $5)', [page.url, page.title, page.description, page.content, topic]);
       for (const passage of page.chunks) {
         await client.query('insert into passages (url, title, heading, content) values ($1, $2, $3, $4)', [page.url, page.title, passage.heading, passage.content]);
         passages += 1;
@@ -114,6 +113,7 @@ export async function sync(log = () => {}) {
     }
     await client.query('insert into sync_runs (pages, passages) values ($1, $2)', [pages.length, passages]);
     await client.query('commit');
+    await loadIndex();
     return { pages: pages.length, passages };
   } catch (error) {
     await client.query('rollback').catch(() => {});
