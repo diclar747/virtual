@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as db from "./db.mjs";
 
 function synthesizeVoice(text) {
@@ -89,7 +90,8 @@ function speechText(text) {
 }
 
 // Voices the visitor may pick on screen; anything else falls back to the configured default.
-const VOICES = ['es-PY-TaniaNeural', 'es-PY-MarioNeural', 'es-AR-ElenaNeural', 'es-US-PalomaNeural', 'es-ES-XimenaMultilingualNeural', 'en-US-AvaMultilingualNeural'];
+const VOICES = ['es-PY-TaniaNeural', 'es-PY-MarioNeural', 'es-AR-ElenaNeural', 'es-US-PalomaNeural', 'es-ES-XimenaMultilingualNeural', 'en-US-AvaMultilingualNeural',
+  'en-US-EmmaMultilingualNeural', 'en-US-AndrewMultilingualNeural', 'en-US-BrianMultilingualNeural', 'fr-FR-VivienneMultilingualNeural', 'de-DE-SeraphinaMultilingualNeural', 'es-MX-DaliaNeural', 'es-CO-SalomeNeural'];
 
 async function routerVoice(text, voice) {
   const response = await fetch(`${ROUTER_API_BASE}/audio/speech`, {
@@ -283,9 +285,27 @@ const speechCache = new Map();
 const answerCache = new Map();
 const HOUR = 60 * 60 * 1000;
 
+const digest = (text) => createHash("sha1").update(text).digest("hex");
+// Greetings and filler words do not change what is being asked.
+const FILLER = /\b(hola|buenas|buenos dias|buenas tardes|buenas noches|buen dia|por favor|porfa|gracias|che|eh|este|disculpa|disculpe|una consulta|consulta|queria saber|quisiera saber|quiero saber|me podes decir|me puede decir|me decis|decime)\b/g;
+const normalize = (text) => text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9ñ]+/g, " ").replace(FILLER, " ").replace(/\s+/g, " ").trim();
+
+// Two levels of cache. In memory, the exact same conversation is answered at once. In the
+// database, the opening question of a conversation is remembered across restarts, since that is
+// where people repeat themselves ("cuánto sale el A16", "qué planes hay"). Later turns depend on
+// what was said before, so they are not shared between conversations.
 function complete(messages) {
-  const key = JSON.stringify(messages.map((message) => [message.role, message.content.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()]));
-  return remember(answerCache, 500, 6 * HOUR, key, () => completeFresh(messages));
+  const key = JSON.stringify(messages.map((message) => [message.role, normalize(message.content)]));
+  return remember(answerCache, 500, 6 * HOUR, key, async () => {
+    const opening = messages.filter((message) => message.role === "user").length === 1 && messages.at(-1).role === "user" ? normalize(messages.at(-1).content) : "";
+    // The prompts are part of the key, so editing one makes the old answers unreachable.
+    const stored = opening.length > 5 ? digest(`${prompts.system}|${prompts.rules}|${prompts.voice_style}|${opening}`) : "";
+    const known = stored && await db.cachedAnswer(stored);
+    if (known) return { content: known, usage: null, cached: true };
+    const fresh = await completeFresh(messages);
+    if (stored) db.storeAnswer(stored, messages.at(-1).content.slice(0, 500), fresh.content);
+    return fresh;
+  });
 }
 
 async function completeFresh(messages) {
@@ -313,7 +333,14 @@ async function completeFresh(messages) {
 }
 
 function speak(text, voice) {
-  return remember(speechCache, 300, 24 * HOUR, `${voice}|${text}`, () => speakFresh(text, voice));
+  return remember(speechCache, 300, 24 * HOUR, `${voice}|${text}`, async () => {
+    const key = digest(`${VOICES.includes(voice) ? voice : ROUTER_TTS_MODEL}|${speechText(text)}`);
+    const known = await db.cachedSpeech(key);
+    if (known) return known;
+    const fresh = await speakFresh(text, voice);
+    db.storeSpeech(key, fresh.contentType, fresh.audio);
+    return fresh;
+  });
 }
 
 async function speakFresh(text, voice) {
@@ -354,17 +381,22 @@ async function handleTurn(req, res) {
   const send = (item) => res.write(`${JSON.stringify(item)}\n`);
   try {
     const input = JSON.parse((await readBody(req, 3 * 1024 * 1024)).toString("utf8"));
-    const audio = Buffer.from(typeof input.audio === "string" ? input.audio : "", "base64");
-    if (!audio.length) return json(res, 400, { error: "Falta el audio de la consulta." });
-    const form = new FormData();
-    form.append("file", new Blob([audio], { type: "audio/wav" }), "consulta.wav");
-    const { text: question } = await transcribe(form);
+    // When the browser already transcribed the speech while it was being said, it sends the text
+    // and the transcription step is skipped altogether; otherwise it sends the recording.
+    let question = typeof input.text === "string" ? input.text.trim().slice(0, 600) : "";
+    if (!question) {
+      const audio = Buffer.from(typeof input.audio === "string" ? input.audio : "", "base64");
+      if (!audio.length) return json(res, 400, { error: "Falta el audio de la consulta." });
+      const form = new FormData();
+      form.append("file", new Blob([audio], { type: "audio/wav" }), "consulta.wav");
+      ({ text: question } = await transcribe(form));
+    }
     res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" });
     streaming = true;
     send({ type: "transcript", text: question });
     if (!question) return res.end();
-    const { content } = await complete([...cleanMessages(input.messages), { role: "user", content: question }].slice(-12));
-    send({ type: "reply", text: content });
+    const { content, cached } = await complete([...cleanMessages(input.messages), { role: "user", content: question }].slice(-12));
+    send({ type: "reply", text: content, cached: Boolean(cached) });
     const clips = speechParts(content).map((part) => speak(part, input.voice));
     clips.forEach((clip) => clip.catch(() => {}));
     for (const clip of clips) {
@@ -390,8 +422,8 @@ async function handleChat(req, res) {
       return json(res, 400, { error: "Escribí un mensaje para comenzar." });
     }
 
-    const { content, usage } = await complete(messages);
-    json(res, 200, { message: content, usage });
+    const { content, usage, cached } = await complete(messages);
+    json(res, 200, { message: content, usage, cached: Boolean(cached) });
   } catch (error) {
     const status = error.code === "missing_key" ? 503 : error.status && error.status < 500 ? error.status : 502;
     json(res, status, { error: error.message || "No se pudo completar la consulta." });

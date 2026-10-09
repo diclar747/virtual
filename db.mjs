@@ -50,6 +50,20 @@ create table if not exists products (
   details jsonb not null default '{}',
   updated_at timestamptz not null default now()
 );
+create table if not exists answer_cache (
+  key text primary key,
+  question text not null,
+  reply text not null,
+  hits integer not null default 0,
+  created_at timestamptz not null default now()
+);
+create table if not exists speech_cache (
+  key text primary key,
+  mime text not null,
+  audio bytea not null,
+  hits integer not null default 0,
+  created_at timestamptz not null default now()
+);
 create table if not exists sync_runs (
   id bigserial primary key,
   finished_at timestamptz not null default now(),
@@ -89,8 +103,43 @@ export async function loadPrompts() {
 
 export async function status() {
   if (!ready) return { connected: false };
-  const { rows: [counts] } = await pool.query('select (select count(*)::int from pages) as pages, (select count(*)::int from products) as products, (select count(*)::int from passages) as passages, (select max(finished_at) from sync_runs) as synced_at');
+  const { rows: [counts] } = await pool.query('select (select count(*)::int from pages) as pages, (select count(*)::int from products) as products, (select count(*)::int from passages) as passages, (select count(*)::int from answer_cache) as cached_answers, (select count(*)::int from speech_cache) as cached_audio, (select max(finished_at) from sync_runs) as synced_at');
   return { connected: true, ...counts };
+}
+
+// Persistent cache. Answers to a conversation's opening question and every voiced sentence are
+// kept in the database, so a repeated question is served without the model or the voice provider,
+// and that survives restarts. A cache failure never breaks a turn: it just counts as a miss.
+export async function cachedAnswer(key) {
+  if (!ready) return null;
+  try {
+    const { rows } = await pool.query('update answer_cache set hits = hits + 1 where key = $1 returning reply', [key]);
+    return rows[0]?.reply ?? null;
+  } catch { return null; }
+}
+
+export function storeAnswer(key, question, reply) {
+  if (ready) pool.query('insert into answer_cache (key, question, reply) values ($1, $2, $3) on conflict (key) do nothing', [key, question, reply]).catch(() => {});
+}
+
+export function clearAnswers() {
+  if (ready) pool.query('delete from answer_cache').catch(() => {});
+}
+
+export async function cachedSpeech(key) {
+  if (!ready) return null;
+  try {
+    const { rows } = await pool.query('update speech_cache set hits = hits + 1 where key = $1 returning mime, audio', [key]);
+    return rows[0] ? { contentType: rows[0].mime, audio: rows[0].audio } : null;
+  } catch { return null; }
+}
+
+export function storeSpeech(key, contentType, audio) {
+  if (!ready) return;
+  pool.query('insert into speech_cache (key, mime, audio) values ($1, $2, $3) on conflict (key) do nothing', [key, contentType, audio])
+    // Keeps the table bounded: the least used, oldest sentences go first.
+    .then(() => pool.query('delete from speech_cache where key in (select key from speech_cache order by hits desc, created_at desc offset 4000)'))
+    .catch(() => {});
 }
 
 // The passages are few, so they are kept in memory and ranked there (see search.mjs).
@@ -146,6 +195,8 @@ export async function sync(log = () => {}) {
         passages += 1;
       }
     }
+    // Prices may have changed, so answers given from the previous copy are dropped.
+    await client.query('delete from answer_cache');
     await client.query('insert into sync_runs (pages, passages) values ($1, $2)', [pages.length, passages]);
     await client.query('commit');
     await loadIndex();

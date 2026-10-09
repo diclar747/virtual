@@ -35,6 +35,55 @@ let capturePeak = 0;
 let speakingSince = 0;
 let lastLoud = 0;
 
+// Live transcription. Where the browser can recognise speech by itself (Chrome on a computer),
+// the words are written while they are being said, so the turn is sent as text the moment the
+// person stops and the separate transcription step (about a second and a half) disappears.
+// Phones keep sending the recording: there the recogniser fights the microphone we already hold.
+const LiveRecognition = !/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) && (window.SpeechRecognition || window.webkitSpeechRecognition);
+let live = null;
+let liveOk = Boolean(LiveRecognition);
+let liveFailures = 0;
+let liveFinals = [];
+let liveInterim = '';
+let liveAt = 0;
+let liveSince = 0;
+let liveMark = 0;
+let captureLive = false;
+let settling = false;
+
+function liveStart() {
+  if (!liveOk || live) return;
+  const recognizer = new LiveRecognition();
+  recognizer.lang = 'es-PY'; recognizer.continuous = true; recognizer.interimResults = true;
+  recognizer.onresult = event => {
+    if (live !== recognizer) return;
+    liveFinals = []; liveInterim = '';
+    for (const result of event.results) { if (result.isFinal) liveFinals.push(result[0].transcript); else liveInterim += result[0].transcript; }
+    liveAt = performance.now(); liveFailures = 0;
+  };
+  recognizer.onerror = event => {
+    // Without permission or without the recognition service there is no point in retrying.
+    if (['not-allowed', 'service-not-allowed', 'audio-capture', 'language-not-supported'].includes(event.error) || (event.error === 'network' && ++liveFailures >= 2)) liveOk = false;
+  };
+  recognizer.onend = () => { if (live === recognizer) live = null; };
+  // A recogniser that restarts in the middle of a sentence has lost its beginning.
+  liveFinals = []; liveInterim = ''; liveMark = 0; captureLive = false;
+  try { recognizer.start(); live = recognizer; liveSince = performance.now(); } catch { liveOk = false; }
+}
+
+function liveStop() {
+  const recognizer = live;
+  live = null;
+  try { recognizer?.abort(); } catch { /* already stopped */ }
+}
+
+function liveText() {
+  return [...liveFinals.slice(liveMark), liveInterim].join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// It listens only while the assistant is silent, so it never transcribes the assistant's own voice.
+setInterval(() => { if (active && !speaking && (!pending || settling)) liveStart(); else liveStop(); }, 200);
+
 function show(mode, text, detail = '') {
   orb.dataset.state = mode;
   title.textContent = text;
@@ -116,6 +165,7 @@ function cancelResponse() {
 
 function stop() {
   active = false;
+  settling = false; liveStop();
   ++session;
   cancelResponse();
   if (processor) { processor.onaudioprocess = null; processor.disconnect(); processor = null; }
@@ -152,6 +202,8 @@ function onMicrophone(event) {
     if (!voiced && !speaking) noise = Math.max(.0005, Math.min(.02, noise * .98 + rms * .02));
     if (speechFrames < 2) return;
     capturing = true; confirmed = false; samples = preRoll.slice(); preRoll = [];
+    // Only trust the live transcript if the recogniser was already listening before these words.
+    captureLive = Boolean(live) && !speaking && !pending && now - liveSince > 400; liveMark = liveFinals.length;
     voicedMs = speechFrames * frameMs; capturePeak = rms;
     utteranceStart = lastVoice = now;
     if (!speaking && !pending) show('listening', 'Te escucho');
@@ -178,7 +230,7 @@ function onMicrophone(event) {
     }
     confirmed = false;
     resumable = heard;
-    answer(wavBytes(heard, context.sampleRate), turn);
+    answer(wavBytes(heard, context.sampleRate), turn, captureLive);
   }
 }
 
@@ -214,7 +266,7 @@ function play(clip, signal) {
   });
 }
 
-async function answer(recording, currentTurn) {
+async function answer(recording, currentTurn, useLive = false) {
   const controller = new AbortController();
   pending = controller;
   const current = () => active && currentTurn === turn && !controller.signal.aborted;
@@ -241,10 +293,21 @@ async function answer(recording, currentTurn) {
   };
   try {
     show('thinking', 'Un momento');
+    let said = '';
+    if (useLive) {
+      // Give the recogniser a moment to write the last word, then take what it heard.
+      settling = true;
+      const since = performance.now();
+      while (performance.now() - liveAt < 250 && performance.now() - since < 500) await new Promise(resolve => setTimeout(resolve, 50));
+      said = liveText();
+      settling = false;
+      if (!current()) return;
+    }
     // Transcription, answer and voice travel in one request; each clip plays as soon as it arrives.
+    // With a live transcript the text goes instead of the recording and nothing is transcribed.
     const response = await request('/api/turn', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audio: toBase64(recording), messages: history.slice(-12), voice: voiceSelect.value }),
+      body: JSON.stringify({ ...(said ? { text: said } : { audio: toBase64(recording) }), messages: history.slice(-12), voice: voiceSelect.value }),
     }, controller.signal);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -274,7 +337,7 @@ async function answer(recording, currentTurn) {
   } catch (error) {
     if (!current()) return;
     if (playback) history.push({ role: 'assistant', content: reply });
-    pending = null; playback = null; resumable = null; speaking = false;
+    pending = null; playback = null; resumable = null; speaking = false; settling = false;
     show('listening', error.name === 'NotAllowedError' ? 'Tocá para habilitar la voz' : 'No pude responder', error.name === 'NotAllowedError' ? '' : 'Podés intentar de nuevo');
   }
 }
