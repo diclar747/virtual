@@ -280,12 +280,14 @@ async function answer(recording, currentTurn) {
 }
 
 // The greeting is one of the prompts kept in the database; this text is only the fallback.
-let greetingTemplate = 'Soy {articulo} asistente de Personal, ¿en qué le ayudo?';
+let greetingTemplate = 'Hola, {saludo}. Bienvenido al asistente virtual de Personal. ¿En qué le puedo ayudar?';
 const greetingLoaded = fetch('/api/config').then(response => response.json())
   .then(config => { if (config.greeting) greetingTemplate = config.greeting; }).catch(() => {});
 
 function greetingText() {
-  return greetingTemplate.replace('{articulo}', voiceSelect.selectedOptions[0].dataset.article);
+  const hour = new Date().getHours();
+  const timeOfDay = hour >= 5 && hour < 12 ? 'buenos días' : hour >= 12 && hour < 19 ? 'buenas tardes' : 'buenas noches';
+  return greetingTemplate.replace('{saludo}', timeOfDay).replace('{articulo}', voiceSelect.selectedOptions[0].dataset.article);
 }
 
 // A plain GET lets the service worker keep the greeting, so it plays without waiting for the network.
@@ -308,7 +310,11 @@ async function greet() {
     playback = { text, turn: currentTurn };
     if (!await play(clip, controller.signal) || !current()) return;
     history.push({ role: 'assistant', content: text });
-  } catch { /* Without the greeting the conversation still works. */ }
+  } catch (error) {
+    // Opened without a tap, this browser refuses to play sound: one tap is needed after all.
+    if (error.name === 'NotAllowedError' && current()) { stop(); show('idle', 'Tocá para conversar'); return; }
+    /* Any other failure: without the greeting the conversation still works. */
+  }
   if (!current()) return;
   playback = null; pending = null; speaking = false;
   if (!capturing) show('listening', 'Te escucho');
@@ -321,8 +327,11 @@ audio.onplaying = () => {
   if (!capturing) show('speaking', 'Podés interrumpirme hablando');
 };
 
-trigger.addEventListener('click', async () => {
-  if (active) return stop();
+// Starts the conversation: opens the microphone, greets and listens. It runs by itself when the
+// app opens and stops by itself when the app is closed or hidden, so nobody has to press anything.
+// On those automatic starts the browser may still demand a tap; the page then asks for it.
+async function start() {
+  if (active) return;
   active = true; const currentSession = ++session;
   show('listening', 'Activando el micrófono');
   fetch('/api/warm', { method: 'POST' }).catch(() => {});
@@ -335,8 +344,11 @@ trigger.addEventListener('click', async () => {
     const capture = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
     await prime; audio.pause(); priming = false; URL.revokeObjectURL(primeUrl);
     if (!active || currentSession !== session) { capture.getTracks().forEach(track => track.stop()); return; }
-    stream = capture; context = new AudioContext(); await context.resume();
+    stream = capture; context = new AudioContext();
+    // Without a tap some browsers keep audio suspended and never settle this promise.
+    await Promise.race([context.resume(), new Promise(resolve => setTimeout(resolve, 1200))]);
     if (!active || currentSession !== session) return;
+    if (context.state !== 'running') { stop(); show('idle', 'Tocá para conversar'); return; }
     source = context.createMediaStreamSource(stream);
     processor = context.createScriptProcessor(2048, 1, 1);
     mutedOutput = context.createGain(); mutedOutput.gain.value = 0;
@@ -348,10 +360,16 @@ trigger.addEventListener('click', async () => {
   } catch (error) {
     if (currentSession !== session) return;
     priming = false;
-    stop(); show('idle', error.name === 'NotAllowedError' ? 'Permití el micrófono para conversar' : 'No pude abrir el micrófono');
+    stop(); show('idle', error.name === 'NotAllowedError' ? 'Permití el micrófono para conversar' : 'No pude abrir el micrófono', 'Después tocá el círculo');
   }
-});
+}
+
+trigger.addEventListener('click', () => (active ? stop() : start()));
+// Closing the app, switching to another one or locking the phone ends the listening at once;
+// coming back picks the conversation up again.
 window.addEventListener('pagehide', stop);
+document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));
+greetingLoaded.then(() => { if (!document.hidden) start(); });
 
 // Installable app: the service worker keeps the page, fonts and greeting on the device.
 if ('serviceWorker' in navigator) {
@@ -370,4 +388,4 @@ installButton.addEventListener('click', async () => {
   installPrompt = null;
 });
 window.addEventListener('appinstalled', () => { installButton.hidden = true; });
-show('idle', 'Tocá para conversar');
+show('idle', 'Abriendo el asistente');

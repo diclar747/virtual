@@ -180,7 +180,7 @@ Persona: "¿Cuánto sale el Samsung A dieciséis?" Vos: "El Galaxy A dieciséis 
 Persona: "¿Y en cuotas?" Vos: "Con tarjeta de crédito lo podés llevar hasta en veinticuatro cuotas de treinta y seis mil seiscientos guaraníes. ¿Con qué banco es tu tarjeta?"
 Persona: "No me anda internet en casa." Vos: "Uy, qué macana. ¿Te pasa en todos los aparatos o solamente en uno?"`;
 
-const GREETING = "Soy {articulo} asistente de Personal, ¿en qué le ayudo?";
+const GREETING = "Hola, {saludo}. Bienvenido al asistente virtual de Personal. ¿En qué le puedo ayudar?";
 
 // The prompts are stored in the database (table "prompts") so they can be edited without a
 // release; these texts are only the first-time defaults and the fallback when it is unreachable.
@@ -188,7 +188,7 @@ const DEFAULT_PROMPTS = {
   system: { content: knowledge, description: "Quién es el asistente, sus reglas y el resumen base de servicios." },
   rules: { content: RULES, description: "Límites de seguridad que se repiten en cada respuesta." },
   voice_style: { content: VOICE_STYLE, description: "Cómo debe hablar en la llamada de voz." },
-  greeting: { content: GREETING, description: "Saludo inicial. {articulo} se reemplaza por la/el según la voz." },
+  greeting: { content: GREETING, description: "Saludo al abrir la app. {saludo} se reemplaza por buenos días, buenas tardes o buenas noches según la hora; {articulo} por la/el según la voz." },
 };
 let prompts = Object.fromEntries(Object.entries(DEFAULT_PROMPTS).map(([key, value]) => [key, value.content]));
 
