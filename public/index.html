@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#08090d" />
+    <meta name="theme-color" content="#1eb5e1" />
     <title>Asistente de Personal</title>
     <meta name="description" content="Conversá por voz con el asistente de Personal." />
     <link rel="manifest" href="/manifest.webmanifest" />
@@ -15,10 +15,10 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=20261009-8" />
+    <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css?v=20261009-9" />
   </head>
-  <body class="voice-only">
+  <body class="voice-only brand-personal">
     <div class="noise"></div>
     <div class="ambient ambient-one"></div>
     <div class="ambient ambient-two"></div>
@@ -79,7 +79,10 @@
 
       <section class="orb-panel" aria-label="Interacción por voz">
         <div class="orb-panel-top"><span>Modo conversación</span><span class="orb-status" id="orbStatus">En espera</span></div>
-        <div class="app-title">Asistente de <em>Personal</em></div>
+        <div class="brand-header">
+          <img class="brand-logo" src="/logo-personal.svg" alt="Personal" width="190" height="79" />
+          <div class="brand-tagline">Asistente virtual</div>
+        </div>
         <div class="orb-stage">
           <div class="orbit orbit-one"></div>
           <div class="orbit orbit-two"></div>
@@ -122,8 +125,8 @@
     </main>
 
     <footer class="footer"><span>Demostración independiente</span><span class="footer-separator">•</span><span>Información pública de Personal Paraguay</span></footer>
-    <div class="build-version">Versión 9 oct · 8</div>
+    <div class="build-version">Demo · Versión 9 oct · 9</div>
 
-    <script src="/conversation.js?v=20261009-8" defer></script>
+    <script src="/conversation.js?v=20261009-9" defer></script>
   </body>
 </html>

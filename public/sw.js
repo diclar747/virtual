@@ -1,9 +1,9 @@
 // Bump BUILD together with the ?v= of the page assets so every release replaces the cached shell.
-const BUILD = '20261009-8';
+const BUILD = '20261009-9';
 const SHELL = `shell-${BUILD}`;
 const VOICE = 'voice-v1';
 const FONTS = 'fonts-v1';
-const ASSETS = ['/', `/styles.css?v=${BUILD}`, `/conversation.js?v=${BUILD}`, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+const ASSETS = ['/', `/styles.css?v=${BUILD}`, `/conversation.js?v=${BUILD}`, '/manifest.webmanifest', '/logo-personal.svg', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(SHELL).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
