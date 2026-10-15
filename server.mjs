@@ -346,7 +346,7 @@ function amountsInWords(text) {
 }
 
 function passagesText(found) {
-  return found.map((passage) => `(${passage.title}${passage.heading ? ` › ${passage.heading}` : ""})\n${(passage.whole ? passage.content : passage.content.slice(0, 1500))}`).join("\n\n");
+  return found.map((passage) => `(${passage.title}${passage.heading ? ` › ${passage.heading}` : ""})\n${(passage.whole ? passage.content : passage.content.slice(0, 1000))}`).join("\n\n");
 }
 
 // Sessions are paid per use, so one address cannot open them without limit.

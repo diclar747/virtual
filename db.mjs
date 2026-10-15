@@ -166,11 +166,15 @@ export function overview() {
 
 export async function search(question, thread = question, earlier = thread) {
   if (!ready) return [];
-  const results = [...searchIndex(index, question, 4)];
+  // Every extra passage is text the model must read before it can start answering, so the
+  // context is kept to what the question needs: about five passages instead of eight.
+  const results = [...searchIndex(index, question, 3)];
   const add = (found, room) => { for (const passage of found) if (results.length < room && !results.some((known) => known.url === passage.url && known.content === passage.content)) results.push(passage); };
-  add(searchIndex(index, thread, 4), 7);
-  add(searchIndex(index, earlier, 3), 8);
-  if (PHONE_TALK.test(thread)) {
+  add(searchIndex(index, thread, 3), 5);
+  add(searchIndex(index, earlier, 2), 6);
+  // The full phone list only helps when no particular phone was found (budget, "the cheapest").
+  const namedPhone = results.slice(0, 2).some((passage) => /\/p(#con-plan)?$/.test(passage.url));
+  if (PHONE_TALK.test(thread) && !namedPhone) {
     const list = index.passages.find((passage) => passage.url.endsWith('#telefonos-por-precio'));
     if (list && !results.some((known) => known.url === list.url)) results.unshift({ ...list, whole: true });
     else results.forEach((known) => { if (known.url === list?.url) known.whole = true; });
