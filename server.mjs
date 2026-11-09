@@ -386,7 +386,7 @@ async function handleRealtimeSession(req, res) {
         parameters: { type: "object", properties: { consulta: { type: "string", description: "Lo que hay que buscar, con el nombre del producto o servicio del que se habla. Ejemplo: 'Samsung Galaxy A16 cuotas tarjeta Itaú'." } }, required: ["consulta"] } },
       { type: "function", name: "identificar_cliente_demo",
         description: "Busca una cuenta de DEMOSTRACIÓN (datos ficticios) por número de teléfono de prueba, código de cédula de prueba o nombre, y devuelve su plan, internet contratado, consumido y disponible con el porcentaje usado, saldo, factura, vencimiento, estado y alertas. Usala cuando la persona dé su número o código de demostración o quiera consultar su línea, saldo, gigas o factura.",
-        parameters: { type: "object", properties: { dato: { type: "string", description: "Lo que dijo la persona para identificarse, tal cual: número, código de cédula de prueba o nombre. Ejemplo: '0981 000 001' o 'DEMO-CI-003'." } }, required: ["dato"] } },
+        parameters: { type: "object", properties: { dato: { type: "string", description: "Lo que dijo la persona para identificarse, tal cual: número, código de cédula de prueba o nombre. Ejemplo: '0975 000 001' o 'DEMO-CI-003'." } }, required: ["dato"] } },
       { type: "function", name: "simular_paquete",
         description: "Simula la compra de un paquete extra de internet de la demostración (2, 5, 10 o 20 GB) para la cuenta de demostración identificada. No activa ni cobra nada: devuelve una confirmación simulada.",
         parameters: { type: "object", properties: { gigas: { type: "number", description: "Gigas del paquete: 2, 5, 10 o 20." } }, required: ["gigas"] } }],
@@ -408,7 +408,7 @@ let demoAccounts = DEMO_CLIENTS;
 const demoById = (id) => demoAccounts.find((client) => client.id === Number(id)) || null;
 
 // The demo account of a turn: the one already chosen in this conversation or, if none yet, one
-// named in what was just said ("mi número es 0981 000 001").
+// named in what was just said ("mi número es 0975 000 001").
 function demoAccountFor(input, said) {
   return demoById(input.account) || (said ? findDemoClient(demoAccounts, said) : null);
 }
@@ -417,7 +417,7 @@ function demoAccountFor(input, said) {
 async function handleDemoIdentify(req, res) {
   const input = await readJson(req).catch(() => ({}));
   const client = input.id ? demoById(input.id) : findDemoClient(demoAccounts, String(input.dato || "").slice(0, 200));
-  if (!client) return json(res, 200, { found: false, text: "No se encontró ninguna cuenta de demostración con ese dato. Las cuentas de prueba usan números como 0981-000-001 o códigos como DEMO-CI-001. Pedile que lo repita." });
+  if (!client) return json(res, 200, { found: false, text: "No se encontró ninguna cuenta de demostración con ese dato. Las cuentas de prueba usan números de Personal como 0975-000-001 o códigos como DEMO-CI-001. Pedile que lo repita." });
   const { text, view } = describeClient(client);
   json(res, 200, { found: true, text: `${amountsInWords(text)}\n${amountsInWords(packsHint(view))}`, view });
 }

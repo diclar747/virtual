@@ -3,11 +3,11 @@
 // is connected to Personal's systems; every record is made up and the assistant says so.
 
 export const DEMO_CLIENTS = [
-  { id: 1, name: 'Carlos Benítez', cedula: 'DEMO-CI-001', phone: '0981-000-001', plan: 'Personal Max 80 GB', gbTotal: 80, gbUsed: 52.5, balance: 18500, bill: 125000, due: '2026-11-15', status: 'Pendiente', calls: 'Ilimitadas', sms: 100 },
-  { id: 2, name: 'María González', cedula: 'DEMO-CI-002', phone: '0971-000-002', plan: 'Personal Max 120 GB', gbTotal: 120, gbUsed: 32.8, balance: 42000, bill: 185000, due: '2026-11-20', status: 'Pendiente', calls: 'Ilimitadas', sms: 200 },
-  { id: 3, name: 'Roberto Fernández', cedula: 'DEMO-CI-003', phone: '0982-000-003', plan: 'Personal Max 40 GB', gbTotal: 40, gbUsed: 38.2, balance: 3500, bill: 89000, due: '2026-11-05', status: 'Vencida', calls: '500 minutos', sms: 50 },
-  { id: 4, name: 'Ana Martínez', cedula: 'DEMO-CI-004', phone: '0972-000-004', plan: 'Personal Max 200 GB', gbTotal: 200, gbUsed: 74.6, balance: 67000, bill: 245000, due: '2026-11-25', status: 'Pagada', calls: 'Ilimitadas', sms: 300 },
-  { id: 5, name: 'Diego Ramírez', cedula: 'DEMO-CI-005', phone: '0961-000-005', plan: 'Personal Max 60 GB', gbTotal: 60, gbUsed: 59.1, balance: 8200, bill: 110000, due: '2026-11-12', status: 'Pendiente', calls: 'Ilimitadas', sms: 100 },
+  { id: 1, name: 'Carlos Benítez', cedula: 'DEMO-CI-001', phone: '0975-000-001', plan: 'Personal Max 80 GB', gbTotal: 80, gbUsed: 52.5, balance: 18500, bill: 125000, due: '2026-11-15', status: 'Pendiente', calls: 'Ilimitadas', sms: 100 },
+  { id: 2, name: 'María González', cedula: 'DEMO-CI-002', phone: '0975-000-002', plan: 'Personal Max 120 GB', gbTotal: 120, gbUsed: 32.8, balance: 42000, bill: 185000, due: '2026-11-20', status: 'Pendiente', calls: 'Ilimitadas', sms: 200 },
+  { id: 3, name: 'Roberto Fernández', cedula: 'DEMO-CI-003', phone: '0975-000-003', plan: 'Personal Max 40 GB', gbTotal: 40, gbUsed: 38.2, balance: 3500, bill: 89000, due: '2026-11-05', status: 'Vencida', calls: '500 minutos', sms: 50 },
+  { id: 4, name: 'Ana Martínez', cedula: 'DEMO-CI-004', phone: '0975-000-004', plan: 'Personal Max 200 GB', gbTotal: 200, gbUsed: 74.6, balance: 67000, bill: 245000, due: '2026-11-25', status: 'Pagada', calls: 'Ilimitadas', sms: 300 },
+  { id: 5, name: 'Diego Ramírez', cedula: 'DEMO-CI-005', phone: '0975-000-005', plan: 'Personal Max 60 GB', gbTotal: 60, gbUsed: 59.1, balance: 8200, bill: 110000, due: '2026-11-12', status: 'Pendiente', calls: 'Ilimitadas', sms: 100 },
 ];
 
 // Simulated extra packs: they are never activated or charged.
@@ -22,7 +22,9 @@ export function findDemoClient(clients, said) {
   const text = plain(said);
   const digits = text.replace(/\b(cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\b/g, (word) => SPOKEN_DIGITS[word]).replace(/\D/g, '');
   if (digits.length >= 6) {
-    const byPhone = clients.find((client) => { const phone = client.phone.replace(/\D/g, ''); return digits.endsWith(phone.slice(-6)) || digits.includes(phone.slice(1)); });
+    // With the whole number (nine digits or more) the prefix must match too, so a Tigo or Claro
+    // number with the same ending is not taken for a Personal demo line.
+    const byPhone = clients.find((client) => { const phone = client.phone.replace(/\D/g, ''); return digits.length >= 9 ? digits.endsWith(phone.slice(1)) : digits.endsWith(phone.slice(-6)); });
     if (byPhone) return byPhone;
   }
   // "demo ce i cero cero cinco" → "demo ce i 005"
