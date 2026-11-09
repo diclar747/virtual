@@ -278,6 +278,7 @@ async function answer(recording, currentTurn, useLive = false) {
   let playing = Promise.resolve(true);
   const handle = item => {
     if (item.type === 'transcript') question = item.text;
+    else if (item.type === 'account') showAccount(item.view);
     else if (item.type === 'reply') reply = item.text;
     else if (item.type === 'error') throw new Error(item.message);
     else if (item.type === 'audio') {
@@ -311,7 +312,7 @@ async function answer(recording, currentTurn, useLive = false) {
     // With a live transcript the text goes instead of the recording and nothing is transcribed.
     const response = await request('/api/turn', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...(said ? { text: said } : { audio: toBase64(recording) }), messages: history.slice(-12), voice: voiceSelect.value }),
+      body: JSON.stringify({ ...(said ? { text: said } : { audio: toBase64(recording) }), messages: history.slice(-12), voice: voiceSelect.value, account: demoAccount?.id }),
     }, controller.signal);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -436,15 +437,25 @@ async function startCall(currentSession) {
     else if (event.type === 'response.output_audio_transcript.done' && event.transcript?.trim()) history.push({ role: 'assistant', content: event.transcript.trim() });
     else if (event.type === 'response.done') {
       // The model asked to look something up: fetch it from our database and let it answer.
-      const lookups = (event.response?.output || []).filter(item => item.type === 'function_call' && item.name === 'buscar_informacion');
+      // The model asked for something: a search in our database, a demo account or a simulated pack.
+      const lookups = (event.response?.output || []).filter(item => item.type === 'function_call');
       if (!lookups.length) return;
       for (const lookup of lookups) {
         let text = 'No se pudo consultar la información en este momento.';
         try {
-          const question = JSON.parse(lookup.arguments || '{}').consulta || '';
-          const response = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, thread: history.slice(-4).map(entry => entry.content).join(' ') }) });
-          const data = await response.json();
-          if (response.ok && data.text) text = data.text;
+          const args = JSON.parse(lookup.arguments || '{}');
+          if (lookup.name === 'identificar_cliente_demo') {
+            const data = await postJson('/api/demo/identify', { dato: args.dato || '' });
+            text = data.text || text;
+            if (data.found) showAccount(data.view);
+          } else if (lookup.name === 'simular_paquete') {
+            const data = await postJson('/api/demo/pack', { gigas: args.gigas, id: demoAccount?.id });
+            text = data.text || text;
+            if (data.ok) showPack(data.pack);
+          } else {
+            const data = await postJson('/api/search', { question: args.consulta || '', thread: history.slice(-4).map(entry => entry.content).join(' ') });
+            text = data.text || text;
+          }
         } catch { /* the model is told the lookup failed */ }
         send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: lookup.call_id, output: text } });
       }
@@ -472,8 +483,66 @@ async function startCall(currentSession) {
   return true;
 }
 
+// ───────── Demo accounts ─────────
+// Five made-up customer accounts show what personal service would look like: the person names a
+// demo number or picks one on screen, and a card shows the line, data, balance and bill.
+const accountSelect = document.querySelector('#accountSelect');
+const accountCard = document.querySelector('#accountCard');
+let demoAccount = null;
+
+async function postJson(path, body) {
+  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return response.json();
+}
+
+const escapeText = text => String(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+const gs = value => `${Math.round(value).toLocaleString('es-PY').replace(/,/g, '.')} Gs.`;
+const gb = value => `${Number(value).toLocaleString('es-PY', { maximumFractionDigits: 1 })} GB`;
+
+function showAccount(view) {
+  demoAccount = view || null;
+  accountSelect.value = view ? String(view.id) : '';
+  accountCard.hidden = !view;
+  document.body.classList.toggle('has-account', Boolean(view));
+  if (!view) { accountCard.innerHTML = ''; return; }
+  const low = view.gbLeft / view.gbTotal < 0.1;
+  accountCard.innerHTML = `
+    <div class="account-head"><div><strong>${escapeText(view.name)}</strong><span>${escapeText(view.phone)} · ${escapeText(view.plan)}</span></div><em>Demo · datos ficticios</em></div>
+    <div class="account-data"><div class="account-bar${low ? ' low' : ''}"><i style="width:${Math.min(100, view.usedPercent)}%"></i></div>
+      <p><b>${gb(view.gbLeft)}</b> disponibles de ${gb(view.gbTotal)} · ${String(view.usedPercent).replace('.', ',')}% usado</p></div>
+    <div class="account-grid">
+      <div><span>Saldo</span><b>${gs(view.balance)}</b></div>
+      <div><span>Factura</span><b>${gs(view.bill)}</b></div>
+      <div><span>Vence</span><b>${escapeText(view.due)}</b></div>
+      <div><span>Estado</span><b class="status-${escapeText(view.status.toLowerCase())}">${escapeText(view.status)}</b></div>
+    </div>
+    ${view.alerts.length ? `<ul class="account-alerts">${view.alerts.map(alert => `<li>${escapeText(alert)}</li>`).join('')}</ul>` : ''}`;
+}
+
+function showPack(pack) {
+  if (!demoAccount || !pack) return;
+  accountCard.querySelector('.account-pack')?.remove();
+  accountCard.insertAdjacentHTML('beforeend', `<p class="account-pack">Compra simulada: Extra ${pack.gb} GB por ${gs(pack.price)}. No se activó ni se cobró nada.</p>`);
+}
+
+fetch('/api/demo/clients').then(response => response.json()).then(({ clients }) => {
+  for (const client of clients) accountSelect.add(new Option(`${client.name} · ${client.phone}`, client.id));
+}).catch(() => { accountSelect.closest('label').hidden = true; });
+
+accountSelect.addEventListener('change', async () => {
+  if (!accountSelect.value) { showAccount(null); return; }
+  const data = await postJson('/api/demo/identify', { id: Number(accountSelect.value) }).catch(() => null);
+  if (!data?.found) return;
+  showAccount(data.view);
+  // In a live conversation the model is told which account was picked and greets that person.
+  if (call?.channel.readyState === 'open') {
+    call.channel.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: `La persona eligió en la pantalla esta cuenta de demostración. Usala para todo lo que pregunte sobre su línea:\n${data.text}` }] } }));
+    call.channel.send(JSON.stringify({ type: 'response.create', response: { instructions: 'Saludá a la persona por su nombre en una frase corta, aclará en pocas palabras que son datos de demostración, mencioná su alerta más importante si tiene una y preguntale qué quiere consultar.' } }));
+  }
+});
+
 // The greeting is one of the prompts kept in the database; this text is only the fallback.
-let greetingTemplate = 'Hola, {saludo}. Bienvenido, soy {articulo} asistente virtual de Personal. ¿En qué puedo ayudarte?';
+let greetingTemplate = 'Hola, {saludo}. Bienvenido, soy {articulo} asistente virtual de Personal. Te ayudo con planes, equipos y, en esta demostración, con los datos de tu línea. ¿En qué puedo ayudarte?';
 const greetingLoaded = fetch('/api/config').then(response => response.json())
   .then(config => { if (config.greeting) greetingTemplate = config.greeting; if (config.realtime && window.RTCPeerConnection) useLiveVoices(config.realtimeVoices); }).catch(() => {});
 

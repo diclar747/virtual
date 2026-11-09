@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as db from "./db.mjs";
+import { DEMO_CLIENTS, findDemoClient, describeClient, packsText, simulatePack } from "./demo.mjs";
 
 function synthesizeVoice(text) {
   if (process.platform !== 'win32') throw new Error('Configurá ROUTER_API_KEY y ROUTER_TTS_MODEL para generar voz en el servidor Linux.');
@@ -189,7 +190,7 @@ Persona: "¿Cuánto sale el Samsung A dieciséis?" Vos: "El Galaxy A dieciséis 
 Persona: "¿Y en cuotas?" Vos: "Con tarjeta de crédito lo podés llevar hasta en veinticuatro cuotas de treinta y seis mil seiscientos guaraníes. ¿Con qué banco es tu tarjeta?"
 Persona: "No me anda internet en casa." Vos: "Uy, qué macana. ¿Te pasa en todos los aparatos o solamente en uno?"`;
 
-const GREETING = "Hola, {saludo}. Bienvenido, soy {articulo} asistente virtual de Personal. ¿En qué puedo ayudarte?";
+const GREETING = "Hola, {saludo}. Bienvenido, soy {articulo} asistente virtual de Personal. Te ayudo con planes, equipos y, en esta demostración, con los datos de tu línea. ¿En qué puedo ayudarte?";
 
 // The prompts are stored in the database (table "prompts") so they can be edited without a
 // release; these texts are only the first-time defaults and the fallback when it is unreachable.
@@ -305,15 +306,16 @@ const normalize = (text) => text.toLowerCase().normalize("NFD").replace(/[\u0300
 // database, the opening question of a conversation is remembered across restarts, since that is
 // where people repeat themselves ("cuánto sale el A16", "qué planes hay"). Later turns depend on
 // what was said before, so they are not shared between conversations.
-function complete(messages) {
-  const key = JSON.stringify(messages.map((message) => [message.role, normalize(message.content)]));
+function complete(messages, account = "") {
+  const key = JSON.stringify([account, ...messages.map((message) => [message.role, normalize(message.content)])]);
   return remember(answerCache, 500, 6 * HOUR, key, async () => {
-    const opening = messages.filter((message) => message.role === "user").length === 1 && messages.at(-1).role === "user" ? normalize(messages.at(-1).content) : "";
+    // Answers about a demo account are personal, so they are never shared through the database.
+    const opening = !account && messages.filter((message) => message.role === "user").length === 1 && messages.at(-1).role === "user" ? normalize(messages.at(-1).content) : "";
     // The prompts are part of the key, so editing one makes the old answers unreachable.
     const stored = opening.length > 5 ? digest(`${prompts.system}|${prompts.rules}|${prompts.voice_style}|${opening}`) : "";
     const known = stored && await db.cachedAnswer(stored);
     if (known) return { content: known, usage: null, cached: true };
-    const fresh = await completeFresh(messages);
+    const fresh = await completeFresh(messages, account);
     if (stored) db.storeAnswer(stored, messages.at(-1).content.slice(0, 500), fresh.content);
     return fresh;
   });
@@ -381,13 +383,49 @@ async function handleRealtimeSession(req, res) {
       },
       tools: [{ type: "function", name: "buscar_informacion",
         description: "Busca en la información publicada por Personal (su web y su tienda online): productos, precios, cuotas con tarjeta, bancos, fichas técnicas, planes, packs, internet hogar, Flow, roaming, portabilidad, servicios, envíos, formas de pago y ayuda de soporte. Devuelve los textos más relacionados.",
-        parameters: { type: "object", properties: { consulta: { type: "string", description: "Lo que hay que buscar, con el nombre del producto o servicio del que se habla. Ejemplo: 'Samsung Galaxy A16 cuotas tarjeta Itaú'." } }, required: ["consulta"] } }],
+        parameters: { type: "object", properties: { consulta: { type: "string", description: "Lo que hay que buscar, con el nombre del producto o servicio del que se habla. Ejemplo: 'Samsung Galaxy A16 cuotas tarjeta Itaú'." } }, required: ["consulta"] } },
+      { type: "function", name: "identificar_cliente_demo",
+        description: "Busca una cuenta de DEMOSTRACIÓN (datos ficticios) por número de teléfono de prueba, código de cédula de prueba o nombre, y devuelve su plan, internet contratado, consumido y disponible con el porcentaje usado, saldo, factura, vencimiento, estado y alertas. Usala cuando la persona dé su número o código de demostración o quiera consultar su línea, saldo, gigas o factura.",
+        parameters: { type: "object", properties: { dato: { type: "string", description: "Lo que dijo la persona para identificarse, tal cual: número, código de cédula de prueba o nombre. Ejemplo: '0981 000 001' o 'DEMO-CI-003'." } }, required: ["dato"] } },
+      { type: "function", name: "simular_paquete",
+        description: "Simula la compra de un paquete extra de internet de la demostración (2, 5, 10 o 20 GB) para la cuenta de demostración identificada. No activa ni cobra nada: devuelve una confirmación simulada.",
+        parameters: { type: "object", properties: { gigas: { type: "number", description: "Gigas del paquete: 2, 5, 10 o 20." } }, required: ["gigas"] } }],
       tool_choice: "auto",
     } }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.value) return json(res, 502, { error: data.error?.message || "No se pudo iniciar la voz en vivo." });
   json(res, 200, { value: data.value, model: OPENAI_REALTIME_MODEL, voice });
+}
+
+// The model kept offering extra packs at the end of every answer when the list was always in
+// front of it, so it only gets the list when the account is running out of data.
+function packsHint(view) {
+  return view.gbLeft / view.gbTotal < 0.1 ? packsText() : "Hay paquetes extra simulados de 2, 5, 10 y 20 GB; mencionalos solo si la persona pregunta por más datos.";
+}
+
+let demoAccounts = DEMO_CLIENTS;
+const demoById = (id) => demoAccounts.find((client) => client.id === Number(id)) || null;
+
+// The demo account of a turn: the one already chosen in this conversation or, if none yet, one
+// named in what was just said ("mi número es 0981 000 001").
+function demoAccountFor(input, said) {
+  return demoById(input.account) || (said ? findDemoClient(demoAccounts, said) : null);
+}
+
+// Identifies a demo account (lookup tool of the live model, and the on-screen selector).
+async function handleDemoIdentify(req, res) {
+  const input = await readJson(req).catch(() => ({}));
+  const client = input.id ? demoById(input.id) : findDemoClient(demoAccounts, String(input.dato || "").slice(0, 200));
+  if (!client) return json(res, 200, { found: false, text: "No se encontró ninguna cuenta de demostración con ese dato. Las cuentas de prueba usan números como 0981-000-001 o códigos como DEMO-CI-001. Pedile que lo repita." });
+  const { text, view } = describeClient(client);
+  json(res, 200, { found: true, text: `${amountsInWords(text)}\n${amountsInWords(packsHint(view))}`, view });
+}
+
+async function handleDemoPack(req, res) {
+  const input = await readJson(req).catch(() => ({}));
+  const result = simulatePack(demoById(input.id), input.gigas);
+  json(res, 200, { ...result, text: amountsInWords(result.text) });
 }
 
 // What the live model's lookup tool returns.
@@ -403,7 +441,7 @@ async function handleSearch(req, res) {
   json(res, 200, { text: closest.length ? amountsInWords(passagesText(closest)) : "No se encontró información publicada sobre eso." });
 }
 
-async function completeFresh(messages) {
+async function completeFresh(messages, account = "") {
   // The passages of personal.com.py closest to what was just asked travel with the question.
   // The system message must stay identical between calls: the provider takes about three
   // seconds longer whenever it changes, so nothing variable may be added to it.
@@ -413,8 +451,11 @@ async function completeFresh(messages) {
   const earlier = messages.slice(-8).map((message) => message.content.replace(/\[El usuario interrumpió[^\]]*\]/g, "")).join(" ");
   const found = await db.search(messages.at(-1)?.content || "", thread, earlier);
   const last = messages.at(-1);
-  const grounded = found.length && last?.role === "user"
-    ? [...messages.slice(0, -1), { role: "user", content: `[Información publicada por Personal en su web y su tienda, buscada para esta consulta. Usá solo lo que sirva; si no alcanza para responder, decilo.]\n${passagesText(found)}\n\n[Lo que dijo el cliente]\n${last.content}` }]
+  const blocks = [];
+  if (account) blocks.push(`[Cuenta de demostración identificada en esta conversación. Respondé sobre su línea con estos datos ficticios. ${packsText()} Ofrecelos solo si la persona pregunta por más datos o le quedan pocos.]\n${account}`);
+  if (found.length) blocks.push(`[Información publicada por Personal en su web y su tienda, buscada para esta consulta. Usá solo lo que sirva; si no alcanza para responder, decilo.]\n${passagesText(found)}`);
+  const grounded = blocks.length && last?.role === "user"
+    ? [...messages.slice(0, -1), { role: "user", content: `${blocks.join("\n\n")}\n\n[Lo que dijo el cliente]\n${last.content}` }]
     : messages;
   const voiceMessages = [{ role: 'system', content: `${prompts.system}\n\n${prompts.rules}\n\n${prompts.voice_style}` }, ...grounded];
   const data = ROUTER_API_KEY ? await routerChat(voiceMessages) : await callNiro("/chat/completions", {
@@ -490,7 +531,9 @@ async function handleTurn(req, res) {
     streaming = true;
     send({ type: "transcript", text: question });
     if (!question) return res.end();
-    const { content, cached } = await complete([...cleanMessages(input.messages), { role: "user", content: question }].slice(-12));
+    const client = demoAccountFor(input, question);
+    if (client && client.id !== Number(input.account)) send({ type: "account", view: describeClient(client).view });
+    const { content, cached } = await complete([...cleanMessages(input.messages), { role: "user", content: question }].slice(-12), client ? describeClient(client).text : "");
     send({ type: "reply", text: content, cached: Boolean(cached) });
     const clips = speechParts(content).map((part) => speak(part, input.voice));
     clips.forEach((clip) => clip.catch(() => {}));
@@ -517,8 +560,9 @@ async function handleChat(req, res) {
       return json(res, 400, { error: "Escribí un mensaje para comenzar." });
     }
 
-    const { content, usage, cached } = await complete(messages);
-    json(res, 200, { message: content, usage, cached: Boolean(cached) });
+    const client = demoAccountFor(input, messages.at(-1)?.content);
+    const { content, usage, cached } = await complete(messages, client ? describeClient(client).text : "");
+    json(res, 200, { message: content, usage, cached: Boolean(cached), account: client ? describeClient(client).view : null });
   } catch (error) {
     const status = error.code === "missing_key" ? 503 : error.status && error.status < 500 ? error.status : 502;
     json(res, status, { error: error.message || "No se pudo completar la consulta." });
@@ -569,6 +613,9 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/config") return json(res, 200, { greeting: prompts.greeting, realtime: Boolean(OPENAI_API_KEY), realtimeVoices: REALTIME_VOICES });
     if (req.method === "POST" && url.pathname === "/api/realtime/session") return await handleRealtimeSession(req, res);
     if (req.method === "POST" && url.pathname === "/api/search") return await handleSearch(req, res);
+    if (req.method === "GET" && url.pathname === "/api/demo/clients") return json(res, 200, { clients: demoAccounts.map((client) => ({ id: client.id, name: client.name, phone: client.phone, cedula: client.cedula })) });
+    if (req.method === "POST" && url.pathname === "/api/demo/identify") return await handleDemoIdentify(req, res);
+    if (req.method === "POST" && url.pathname === "/api/demo/pack") return await handleDemoPack(req, res);
     if (req.method === "GET" && url.pathname === "/api/health") {
       return json(res, 200, { ok: true, niroConfigured: Boolean(NIRO_API_KEY), apiBase: NIRO_API_BASE, chatProvider: ROUTER_API_KEY ? 'router' : 'niro', chatModel: ROUTER_API_KEY ? ROUTER_CHAT_MODEL : 'auto', voiceProvider: ROUTER_API_KEY && ROUTER_TTS_MODEL ? 'router' : process.env.OPENAI_API_KEY ? 'openai' : 'windows', voiceModel: ROUTER_TTS_MODEL || null, database: await db.status().catch(() => ({ connected: false })) });
     }
@@ -596,6 +643,7 @@ async function refreshKnowledge() {
   if (!db.enabled()) return;
   try {
     if (!db.isReady() && !await db.connect(DEFAULT_PROMPTS)) return;
+    demoAccounts = await db.demoClients(DEMO_CLIENTS) || demoAccounts;
     const next = { ...prompts, ...await db.loadPrompts() };
     if (JSON.stringify(next) !== JSON.stringify(prompts)) { prompts = next; answerCache.clear(); speechCache.clear(); }
     const synced = await db.syncIfStale((line) => console.log(line));

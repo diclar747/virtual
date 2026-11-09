@@ -203,3 +203,38 @@ textarea::placeholder { color: #737580; }
 .brand-personal .build-version { color: rgba(255,255,255,.75); }
 .brand-personal.voice-only .orb-trigger:focus-visible { outline: 3px solid #fff; outline-offset: 10px; border-radius: 50%; }
 @media (prefers-reduced-motion: reduce) { .brand-personal .orbit, .brand-personal.voice-only .orb, .brand-personal.voice-only .orb-core { animation: none !important; } }
+
+/* Demo account card */
+.brand-personal .account-card { width: min(420px, calc(100vw - 32px)); margin: 18px auto 0; padding: 16px 18px; border-radius: 18px; background: rgba(255,255,255,.96); color: #0b3b52; box-shadow: 0 14px 34px rgba(4,60,104,.28); text-align: left; font-size: 14px; }
+.brand-personal .account-card[hidden] { display: none; }
+.brand-personal .account-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.brand-personal .account-head strong { display: block; font-size: 17px; font-weight: 800; color: #08354b; }
+.brand-personal .account-head span { display: block; margin-top: 2px; color: #4b6b7c; font-size: 13px; }
+.brand-personal .account-head em { flex: none; padding: 3px 8px; border-radius: 999px; background: #e6f7fc; color: #0a6aa8; font-size: 11px; font-style: normal; font-weight: 700; }
+.brand-personal .account-data { margin-top: 12px; }
+.brand-personal .account-bar { height: 10px; border-radius: 999px; background: #e3eef3; overflow: hidden; }
+.brand-personal .account-bar i { display: block; height: 100%; border-radius: inherit; background: #1eb5e1; }
+.brand-personal .account-bar.low i { background: #e2543b; }
+.brand-personal .account-data p { margin: 6px 0 0; color: #4b6b7c; font-size: 13px; }
+.brand-personal .account-data p b { color: #08354b; }
+.brand-personal .account-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+.brand-personal .account-grid span { display: block; color: #6b8695; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.brand-personal .account-grid b { display: block; margin-top: 2px; color: #08354b; font-size: 14px; }
+.brand-personal .account-grid .status-vencida { color: #c23b25; }
+.brand-personal .account-grid .status-pagada { color: #17834a; }
+.brand-personal .account-alerts { margin: 12px 0 0; padding: 10px 12px; list-style: none; border-radius: 12px; background: #fff3ef; color: #9a3a26; font-size: 13px; font-weight: 600; }
+.brand-personal .account-alerts li + li { margin-top: 4px; }
+.brand-personal .account-pack { margin: 10px 0 0; padding: 8px 12px; border-radius: 12px; background: #e9f8ef; color: #17834a; font-size: 13px; font-weight: 700; }
+.brand-personal .voice-picker + .voice-picker { margin-top: 10px; }
+@media (max-width: 420px) { .brand-personal .account-grid { grid-template-columns: repeat(2, 1fr); } }
+
+/* The blue background covers the whole page, also when the account card makes it taller than the screen. */
+html:has(body.brand-personal) { min-height: 100%; background: #0a6aa8; }
+.brand-personal { min-height: 100dvh; background-attachment: scroll; background-size: 100% 100%; }
+/* With an account on screen the ring gets smaller so the card fits without scrolling. */
+.brand-personal.has-account.voice-only .orb-stage { width: min(220px, 56vw); height: min(220px, 56vw); margin-top: 0; }
+.brand-personal.has-account.voice-only .orb { width: min(150px, 38vw); height: min(150px, 38vw); border-width: clamp(16px, 4.4vw, 20px); }
+.brand-personal.has-account .orbit { width: min(150px, 38vw); height: min(150px, 38vw); }
+.brand-personal.has-account .brand-logo { width: min(150px, 38vw); }
+.brand-personal.has-account .voice-title { font-size: clamp(18px, 5vw, 22px); }
+.brand-personal.voice-only .app-shell { padding-bottom: 44px; }

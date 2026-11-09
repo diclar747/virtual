@@ -64,6 +64,11 @@ create table if not exists speech_cache (
   hits integer not null default 0,
   created_at timestamptz not null default now()
 );
+create table if not exists demo_clients (
+  id integer primary key,
+  data jsonb not null,
+  updated_at timestamptz not null default now()
+);
 create table if not exists sync_runs (
   id bigserial primary key,
   finished_at timestamptz not null default now(),
@@ -89,6 +94,16 @@ export async function connect(defaults) {
     ready = true;
   } catch { ready = false; }
   return ready;
+}
+
+// The fictitious demo accounts live in the database so they can be edited without a release.
+// The first time, the built-in ones are stored.
+export async function demoClients(defaults) {
+  try {
+    for (const client of defaults) await pool.query('insert into demo_clients (id, data) values ($1, $2) on conflict (id) do nothing', [client.id, JSON.stringify(client)]);
+    const { rows } = await pool.query('select data from demo_clients order by id');
+    return rows.map((row) => row.data);
+  } catch { return null; }
 }
 
 export async function loadPrompts() {

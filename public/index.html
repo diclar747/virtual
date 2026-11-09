@@ -16,7 +16,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=20261015-1" />
+    <link rel="stylesheet" href="/styles.css?v=20261109-4" />
   </head>
   <body class="voice-only brand-personal">
     <div class="noise"></div>
@@ -103,6 +103,10 @@
           <div class="voice-title" id="voiceTitle">Abriendo el asistente</div>
           <div class="voice-subtitle" id="voiceSubtitle"></div>
         </div>
+        <section class="account-card" id="accountCard" hidden aria-live="polite"></section>
+        <label class="voice-picker">Cuenta demo
+          <select id="accountSelect"><option value="">Ninguna</option></select>
+        </label>
         <label class="voice-picker">Voz
           <select id="voiceSelect">
             <option value="es-PY-TaniaNeural" data-article="la">Tania · mujer, Paraguay</option>
@@ -132,8 +136,8 @@
     </main>
 
     <footer class="footer"><span>Demostración independiente</span><span class="footer-separator">•</span><span>Información pública de Personal Paraguay</span></footer>
-    <div class="build-version">Demo · Versión 15 oct · 1</div>
+    <div class="build-version">Demo · Versión 9 nov · 4</div>
 
-    <script src="/conversation.js?v=20261015-1" defer></script>
+    <script src="/conversation.js?v=20261109-4" defer></script>
   </body>
 </html>
